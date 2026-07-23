@@ -430,6 +430,9 @@ APPEARANCE_CONTROLS::APPEARANCE_CONTROLS( PCB_BASE_FRAME* aParent, wxWindow* aFo
     int screenHeight   = wxSystemSettings::GetMetric( wxSYS_SCREEN_Y );
     m_iconProvider     = new ROW_ICON_PROVIDER( KIUI::c_IndicatorSizeDIP, this );
     m_pointSize        = wxSystemSettings::GetFont( wxSYS_DEFAULT_GUI_FONT ).GetPointSize();
+
+    // An unset panel background resolves to black under stock wxWidgets 3.3 on macOS
+    m_panelLayers->SetBackgroundColour( wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW ) );
     m_layerPanelColour = m_panelLayers->GetBackgroundColour().ChangeLightness( 110 );
     SetBorders( true, false, false, false );
 
@@ -1237,6 +1240,8 @@ void APPEARANCE_CONTROLS::OnDarkModeToggle()
     // overriding some virtual method or responding to some wxWidgets event so that the parent
     // doesn't have to know what it contains.  But, that's not where we are, so... :shrug:
 
+    // Re-read the system colour; the explicit background set in the ctor would otherwise go stale
+    m_panelLayers->SetBackgroundColour( wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW ) );
     m_layerPanelColour = m_panelLayers->GetBackgroundColour().ChangeLightness( 110 );
 
     m_windowLayers->SetBackgroundColour( m_layerPanelColour );
