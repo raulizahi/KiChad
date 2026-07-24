@@ -50,6 +50,33 @@ version and makes the installed launchers self-contained. `./tools/fetch-kicad-l
 `./tools/install-kichad-libraries.sh` remain available when only the library runtime needs to be
 refreshed. Neither command tracks the libraries' moving development branch.
 
+## macOS development build (experimental)
+
+The qualified platform remains Ubuntu 24.04; macOS is a development convenience only.  The tracked
+`CMakePresets.json` stays Linux-only by policy, so the macOS configuration ships as a sample user
+preset:
+
+```sh
+cp CMakeUserPresets.macos.sample.json CMakeUserPresets.json
+cmake --preset kichad-macos
+cmake --build --preset kichad-macos
+```
+
+Notes on the sample:
+
+- Paths assume arm64 Homebrew under `/opt/homebrew`; on Intel Macs substitute `/usr/local`.
+- Boost is pinned to the `boost@1.85` keg: Boost 1.90 removed the Boost.Process v1 API used by
+  `kicad/codex`.  If the plain `boost` formula (1.90+) is installed, `brew unlink boost` so its
+  headers do not shadow 1.85.
+- The preset pins the `python@3.13` framework, `protobuf@33`, `opencascade`, and `libngspice`
+  kegs; install those plus KiCad's usual build dependencies (wxWidgets, ninja, ccache, glew, glm,
+  cairo, …) from Homebrew.
+- Building this source line on macOS requires the toolchain compatibility shims from the
+  `feature/macos-build-compat` branch until they are merged.
+- Developer builds expect a `codex` executable on `PATH` (distribution packaging is not covered
+  here).  Running the GUI and the QA suite from the build tree additionally needs bundle
+  scaffolding (SharedSupport data, a `Python.framework` link) that no script creates yet.
+
 ## Useful checks
 
 ```sh
