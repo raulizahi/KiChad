@@ -94,9 +94,10 @@ const char* ExternalLayoutPolicy()
            "board outline in a clearly spaced area, connected only by the schematic-derived "
            "ratsnest. Leave all remaining placement and all routing to the external third-party "
            "tool exposed by the layout dynamic tool; invoke layout.run when the staged handoff "
-           "state is complete and clean, then layout.adopt to bring the routed board back into "
-           "the project, and finish by running DRC and the remaining gates on the adopted "
-           "result.";
+           "state is complete and clean, then layout.adopt to bring the routed board into the "
+           "project for review. Render and inspect the adopted result and run DRC and the "
+           "remaining gates; if the routed board is rejected, layout.revert restores the "
+           "staged pre-layout board.";
 }
 
 

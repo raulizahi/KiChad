@@ -124,7 +124,7 @@ nlohmann::json LayoutSpec()
                               { "required", nlohmann::json::array( { "operation" } ) } };
     schema["properties"]["operation"] =
             { { "type", "string" },
-              { "enum", nlohmann::json::array( { "status", "run", "adopt" } ) } };
+              { "enum", nlohmann::json::array( { "status", "run", "adopt", "revert" } ) } };
     schema["properties"]["outputDirName"] =
             { { "type", "string" }, { "maxLength", 255 },
               { "description",
@@ -150,11 +150,15 @@ nlohmann::json LayoutSpec()
                "the outline, no tracks) and writes a fully placed and routed copy of the "
                "project into a sibling output directory. Operation status reports whether the "
                "tool is configured; run executes it and reports the output location. The "
-               "input project is never modified by run. Operation adopt copies the routed "
-               "board from the output directory back into the active project, replacing the "
-               "staged board; it requires a pre-turn snapshot, and the PCB editor must not "
-               "hold the board open (or must reload it afterward). After adopt, run DRC and "
-               "the remaining gates on the active project as usual." },
+               "input project is never modified by run. Operation adopt first saves the "
+               "current staged board to the project's .kichad/pre-layout/ directory, then "
+               "copies the routed board from the output directory into the active project; "
+               "operation revert restores that saved pre-layout board when the routed result "
+               "is rejected. Both require a pre-turn snapshot, and the PCB editor must not "
+               "hold the board open (or must reload it afterward). Adopting twice without a "
+               "revert replaces the saved pre-layout board with the previously adopted one, "
+               "so re-stage before adopting again. After adopt, render and inspect the "
+               "result, then run DRC and the remaining gates; revert if it is rejected." },
              { "inputSchema", std::move( schema ) } };
 }
 
@@ -173,8 +177,12 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
 
     const std::string operation = aArguments["operation"].get<std::string>();
 
-    if( operation != "status" && operation != "run" && operation != "adopt" )
-        return failure( "invalid_arguments", "layout.operation must be status, run, or adopt" );
+    if( operation != "status" && operation != "run" && operation != "adopt"
+        && operation != "revert" )
+    {
+        return failure( "invalid_arguments",
+                        "layout.operation must be status, run, adopt, or revert" );
+    }
 
     if( aProjectPath.IsEmpty() || !wxFileName::DirExists( aProjectPath ) )
         return failure( "project_unavailable", "No readable project directory is active" );
@@ -288,6 +296,28 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
         const wxFileName source( outputDirectory.GetFullPath(), routedName );
         const wxFileName target( projectDirectory.GetFullPath(), targetName );
 
+        // Preserve the staged (unrouted) board so layout.revert can restore it if the
+        // routed result is rejected.
+        wxFileName backupDir = wxFileName::DirName( projectDirectory.GetFullPath() );
+        backupDir.AppendDir( wxS( ".kichad" ) );
+        backupDir.AppendDir( wxS( "pre-layout" ) );
+
+        if( !backupDir.DirExists()
+            && !wxFileName::Mkdir( backupDir.GetFullPath(), 0755, wxPATH_MKDIR_FULL ) )
+        {
+            return failure( "write_failed",
+                            "could not create the project's pre-layout backup directory" );
+        }
+
+        const wxFileName backup( backupDir.GetFullPath(), targetName );
+
+        if( target.FileExists()
+            && !wxCopyFile( target.GetFullPath(), backup.GetFullPath(), true ) )
+        {
+            return failure( "write_failed",
+                            "could not back up the staged board before adoption" );
+        }
+
         if( !wxCopyFile( source.GetFullPath(), target.GetFullPath(), true ) )
         {
             return failure( "write_failed",
@@ -296,8 +326,61 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
 
         return success( { { "adoptedBoard", targetName.ToUTF8().data() },
                           { "sourceBoard", source.GetFullPath().ToUTF8().data() },
+                          { "preLayoutBackup", backup.GetFullPath().ToUTF8().data() },
                           { "outputDirectory",
                             outputDirectory.GetFullPath().ToUTF8().data() } } );
+    }
+
+    if( operation == "revert" )
+    {
+        if( !aMutationAvailable )
+        {
+            return failure( "snapshot_required",
+                            "A complete pre-turn project snapshot is required to revert to the "
+                            "pre-layout board" );
+        }
+
+        wxFileName backupDir = wxFileName::DirName( projectDirectory.GetFullPath() );
+        backupDir.AppendDir( wxS( ".kichad" ) );
+        backupDir.AppendDir( wxS( "pre-layout" ) );
+
+        if( !backupDir.DirExists() )
+        {
+            return failure( "backup_missing",
+                            "no pre-layout backup exists; layout.adopt has not been run in "
+                            "this project" );
+        }
+
+        wxDir savedDir( backupDir.GetFullPath() );
+        wxString savedName;
+
+        if( !savedDir.IsOpened()
+            || !savedDir.GetFirst( &savedName, wxS( "*.kicad_pcb" ), wxDIR_FILES ) )
+        {
+            return failure( "backup_missing",
+                            "the pre-layout backup directory contains no .kicad_pcb board" );
+        }
+
+        wxString extraSaved;
+
+        if( savedDir.GetNext( &extraSaved ) )
+        {
+            return failure( "backup_missing",
+                            "the pre-layout backup directory contains more than one "
+                            ".kicad_pcb; revert requires exactly one" );
+        }
+
+        const wxFileName backup( backupDir.GetFullPath(), savedName );
+        const wxFileName target( projectDirectory.GetFullPath(), savedName );
+
+        if( !wxCopyFile( backup.GetFullPath(), target.GetFullPath(), true ) )
+        {
+            return failure( "write_failed",
+                            "could not restore the pre-layout board into the active project" );
+        }
+
+        return success( { { "revertedBoard", savedName.ToUTF8().data() },
+                          { "preLayoutBackup", backup.GetFullPath().ToUTF8().data() } } );
     }
 
     if( !configured )

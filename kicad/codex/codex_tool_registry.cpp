@@ -43,7 +43,8 @@ std::string failureState( const std::string& aCode, const std::string& aTool,
                             && ( aOperation == "apply" || aOperation == "save"
                                  || aOperation == "patch" ) )
                           || ( aTool == "pcb" && aOperation == "mutate" )
-                          || ( aTool == "layout" && aOperation == "adopt" );
+                          || ( aTool == "layout"
+                               && ( aOperation == "adopt" || aOperation == "revert" ) );
 
     if( !mutating || codeIsOneOf( aCode, { "unknown_tool", "invalid_arguments",
                                            "project_unavailable", "invalid_path", "read_failed",
