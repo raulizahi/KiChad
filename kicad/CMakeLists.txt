@@ -28,6 +28,7 @@ set( KICAD_SRCS
     codex/codex_tool_design.cpp
     codex/codex_tool_fabricate.cpp
     codex/codex_tool_inspect.cpp
+    codex/codex_tool_layout.cpp
     codex/codex_tool_pcb.cpp
     codex/codex_tool_project.cpp
     codex/codex_tool_verify.cpp

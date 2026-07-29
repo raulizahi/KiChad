@@ -85,6 +85,21 @@ const char* BaseInstructions()
 }
 
 
+const char* ExternalLayoutPolicy()
+{
+    return "External layout mode is enabled for this installation. Do not attempt component "
+           "placement or routing yourself. Size the board outline so every component could fit "
+           "without abutting, place only connectors and components whose position is "
+           "mechanically constrained on the board, and stage every other component outside the "
+           "board outline in a clearly spaced area, connected only by the schematic-derived "
+           "ratsnest. Leave all remaining placement and all routing to the external third-party "
+           "tool exposed by the layout dynamic tool; invoke layout.run when the staged handoff "
+           "state is complete and clean, then layout.adopt to bring the routed board back into "
+           "the project, and finish by running DRC and the remaining gates on the adopted "
+           "result.";
+}
+
+
 const char* DeveloperInstructions()
 {
     return "KDS is the sole authored design representation. Use the advertised native contracts "

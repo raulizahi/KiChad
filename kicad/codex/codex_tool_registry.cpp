@@ -42,7 +42,8 @@ std::string failureState( const std::string& aCode, const std::string& aTool,
     const bool mutating = ( aTool == "design"
                             && ( aOperation == "apply" || aOperation == "save"
                                  || aOperation == "patch" ) )
-                          || ( aTool == "pcb" && aOperation == "mutate" );
+                          || ( aTool == "pcb" && aOperation == "mutate" )
+                          || ( aTool == "layout" && aOperation == "adopt" );
 
     if( !mutating || codeIsOneOf( aCode, { "unknown_tool", "invalid_arguments",
                                            "project_unavailable", "invalid_path", "read_failed",
@@ -311,6 +312,34 @@ CODEX_TOOL_REGISTRY::CODEX_TOOL_REGISTRY( std::function<wxString()> aProjectPath
 {}
 
 
+void CODEX_TOOL_REGISTRY::SetExternalLayoutTool( const wxString& aPath )
+{
+    std::lock_guard<std::mutex> lock( m_externalLayoutToolMutex );
+    m_externalLayoutTool = aPath.Clone();
+}
+
+
+wxString CODEX_TOOL_REGISTRY::ExternalLayoutTool() const
+{
+    std::lock_guard<std::mutex> lock( m_externalLayoutToolMutex );
+    return m_externalLayoutTool.Clone();
+}
+
+
+void CODEX_TOOL_REGISTRY::SetExternalLayoutLayers( int aLayers )
+{
+    std::lock_guard<std::mutex> lock( m_externalLayoutToolMutex );
+    m_externalLayoutLayers = aLayers;
+}
+
+
+int CODEX_TOOL_REGISTRY::ExternalLayoutLayers() const
+{
+    std::lock_guard<std::mutex> lock( m_externalLayoutToolMutex );
+    return m_externalLayoutLayers;
+}
+
+
 CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::Specs() const
 {
     return JSON::array( { KICHAD::CODEX_TOOLS::ProjectSpec(),
@@ -318,7 +347,8 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::Specs() const
                           KICHAD::CODEX_TOOLS::DesignSpec(),
                           KICHAD::CODEX_TOOLS::PcbSpec(),
                           KICHAD::CODEX_TOOLS::VerifySpec(),
-                          KICHAD::CODEX_TOOLS::FabricateSpec() } );
+                          KICHAD::CODEX_TOOLS::FabricateSpec(),
+                          KICHAD::CODEX_TOOLS::LayoutSpec() } );
 }
 
 
@@ -354,6 +384,8 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::HandleWithContext(
                                 aIpcSocketDirectory, aIpcTimeout, aDependencyResolver );
         else if( aTool == "verify" )
             result = handleVerify( aArguments, aProjectPath );
+        else if( aTool == "layout" )
+            result = handleLayout( aArguments, aProjectPath, aMutationAvailable );
         else if( aTool == "fabricate" )
         {
             result = handleFabricate( aArguments, aProjectPath, aMutationAvailable,

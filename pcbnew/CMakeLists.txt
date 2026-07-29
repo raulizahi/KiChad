@@ -191,6 +191,7 @@ set( PCBNEW_DIALOGS
     dialogs/panel_pcbnew_action_plugins.cpp
     dialogs/panel_pcbnew_action_plugins_base.cpp
     dialogs/panel_pcbnew_color_settings.cpp
+    dialogs/panel_pcb_external_layout.cpp
     dialogs/panel_pcbnew_display_origin.cpp
     dialogs/panel_pcbnew_display_origin_base.cpp
     dialogs/panel_rule_area_properties_keepout_base.cpp

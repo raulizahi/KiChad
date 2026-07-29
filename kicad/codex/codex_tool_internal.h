@@ -44,6 +44,7 @@ nlohmann::json DesignSpec();
 nlohmann::json PcbSpec();
 nlohmann::json VerifySpec();
 nlohmann::json FabricateSpec();
+nlohmann::json LayoutSpec();
 
 class PRIVATE_TEMPORARY_DIRECTORY
 {

@@ -14,6 +14,7 @@
 
 #include <chrono>
 #include <functional>
+#include <mutex>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -52,7 +53,7 @@ public:
                                 const wxFileName&, int, std::string& )>;
     // Bump whenever the model-visible tool or capability contract changes so a project cannot
     // resume a persistent thread created with a broader or incompatible surface.
-    static constexpr int SCHEMA_VERSION = 13;
+    static constexpr int SCHEMA_VERSION = 14;
 
     explicit CODEX_TOOL_REGISTRY( std::function<wxString()> aProjectPathProvider,
                                   std::function<bool()> aMutationGuard = {},
@@ -68,6 +69,14 @@ public:
                                   NATIVE_PREVIEW_RUNNER aNativePreviewRunner = {} );
 
     JSON Specs() const;
+
+    /// Configured external place-and-route executable; thread-safe because tool handlers run
+    /// off the main thread while preferences update from it.
+    void SetExternalLayoutTool( const wxString& aPath );
+    wxString ExternalLayoutTool() const;
+    void SetExternalLayoutLayers( int aLayers );
+    int ExternalLayoutLayers() const;
+
     static bool RequiresFinalConfirmation( const std::string& aTool,
                                            const JSON& aArguments );
     JSON Handle( const std::string& aTool, const JSON& aArguments ) const;
@@ -92,6 +101,12 @@ private:
                     std::chrono::milliseconds aIpcTimeout,
                     const RUNTIME_DEPENDENCY_RESOLVER& aDependencyResolver ) const;
     JSON handleVerify( const JSON& aArguments, const wxString& aProjectPath ) const;
+    JSON handleLayout( const JSON& aArguments, const wxString& aProjectPath,
+                       bool aMutationAvailable ) const;
+
+    mutable std::mutex m_externalLayoutToolMutex;
+    wxString           m_externalLayoutTool;
+    int                m_externalLayoutLayers = 2;
     JSON handleElectricalVerify( const JSON& aArguments,
                                  const wxString& aProjectPath ) const;
     JSON handleLayoutVerify( const JSON& aArguments, const wxString& aProjectPath ) const;

@@ -1424,6 +1424,9 @@ void KICAD_MANAGER_FRAME::CommonSettingsChanged( int aFlags )
     }
 
     m_projectTreePane->ReCreateTreePrj();
+
+    if( m_codexPanel )
+        m_codexPanel->RefreshExternalLayoutSettings();
 }
 
 

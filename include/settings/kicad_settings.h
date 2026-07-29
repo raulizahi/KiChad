@@ -53,6 +53,9 @@ public:
 
     wxString m_CodexModel;
     wxString m_CodexReasoningEffort;
+    bool     m_CodexExternalLayoutMode;
+    wxString m_CodexExternalLayoutTool;
+    int      m_CodexExternalLayoutLayers;
 
 
     std::vector<wxString> m_OpenProjects;

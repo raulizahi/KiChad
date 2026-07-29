@@ -62,6 +62,7 @@
 #include <panel_fp_editor_color_settings.h>
 #include <panel_pcbnew_color_settings.h>
 #include <panel_pcbnew_action_plugins.h>
+#include <panel_pcb_external_layout.h>
 #include <panel_pcbnew_display_origin.h>
 #include <panel_3D_display_options.h>
 #include <panel_3D_opengl_options.h>
@@ -417,6 +418,9 @@ static struct IFACE : public KIFACE_BASE, public UNITS_PROVIDER
 
             return new PANEL_GRID_SETTINGS( aParent, this, frame, cfg, FRAME_PCB_EDITOR );
         }
+
+        case PANEL_PCB_EXTERNAL_LAYOUT:
+            return new PANEL_EXTERNAL_LAYOUT_SETTINGS( aParent );
 
         case PANEL_PCB_ORIGINS_AXES:
             return new PANEL_PCBNEW_DISPLAY_ORIGIN( aParent, GetAppSettings<PCBNEW_SETTINGS>( "pcbnew" ),

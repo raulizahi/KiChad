@@ -21,6 +21,7 @@ namespace KICHAD::CODEX_AGENT_POLICY
 nlohmann::json ThreadConfig();
 const char*    BaseInstructions();
 const char*    DeveloperInstructions();
+const char*    ExternalLayoutPolicy();
 
 } // namespace KICHAD::CODEX_AGENT_POLICY
 

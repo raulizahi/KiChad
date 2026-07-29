@@ -47,6 +47,12 @@ KICAD_SETTINGS::KICAD_SETTINGS() :
     m_params.emplace_back( new PARAM<wxString>( "codex.model", &m_CodexModel, "" ) );
     m_params.emplace_back( new PARAM<wxString>( "codex.reasoning_effort",
                                                 &m_CodexReasoningEffort, "" ) );
+    m_params.emplace_back( new PARAM<bool>( "codex.external_layout.enabled",
+                                            &m_CodexExternalLayoutMode, false ) );
+    m_params.emplace_back( new PARAM<wxString>( "codex.external_layout.tool",
+                                                &m_CodexExternalLayoutTool, "" ) );
+    m_params.emplace_back( new PARAM<int>( "codex.external_layout.layers",
+                                           &m_CodexExternalLayoutLayers, 2, 1, 64 ) );
 
     m_params.emplace_back( new PARAM_LIST<wxString>( "system.open_projects", &m_OpenProjects, {} ) );
 

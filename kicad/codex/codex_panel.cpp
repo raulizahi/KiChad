@@ -20,6 +20,8 @@
 
 #include <wx/button.h>
 #include <wx/choice.h>
+#include <wx/datetime.h>
+#include <wx/ffile.h>
 #include <wx/filename.h>
 #include <wx/intl.h>
 #include <wx/msgdlg.h>
@@ -29,6 +31,8 @@
 #include <wx/textctrl.h>
 #include <wx/thread.h>
 #include <wx/utils.h>
+#include <settings/kicad_settings.h>
+#include <settings/settings_manager.h>
 
 
 wxDECLARE_EVENT( KICHAD_CODEX_TOOL_COMPLETED, wxThreadEvent );
@@ -185,6 +189,7 @@ CODEX_PANEL::CODEX_PANEL( wxWindow* aParent, std::function<wxString()> aProjectP
         m_stopButton( nullptr ),
         m_revertButton( nullptr ),
         m_newConversationButton( nullptr ),
+        m_externalLayoutMode( false ),
         m_preferredModel( std::move( aPreferredModel ) ),
         m_preferredReasoningEffort( std::move( aPreferredReasoningEffort ) ),
         m_shuttingDown( false ),
@@ -282,6 +287,8 @@ CODEX_PANEL::CODEX_PANEL( wxWindow* aParent, std::function<wxString()> aProjectP
     Bind( KICHAD_CODEX_TOOL_COMPLETED, &CODEX_PANEL::onToolCompleted, this );
     Bind( KICHAD_CODEX_DEPENDENCY_REQUESTED,
           &CODEX_PANEL::onRuntimeDependencyRequested, this );
+
+    RefreshExternalLayoutSettings();
 
     m_client.SetMessageHandler( [this]( const JSON& aMessage ) { onAppServerMessage( aMessage ); } );
     m_client.SetStateHandler(
@@ -681,7 +688,11 @@ void CODEX_PANEL::startThread( std::function<void()> aReadyHandler )
         // seeded from that store after each cold launch.
         { "historyMode", "legacy" },
         { "serviceName", "KiChad" },
-        { "baseInstructions", KICHAD::CODEX_AGENT_POLICY::BaseInstructions() },
+        { "baseInstructions", m_externalLayoutMode
+                                      ? std::string( KICHAD::CODEX_AGENT_POLICY::BaseInstructions() )
+                                                + "\n\n"
+                                                + KICHAD::CODEX_AGENT_POLICY::ExternalLayoutPolicy()
+                                      : std::string( KICHAD::CODEX_AGENT_POLICY::BaseInstructions() ) },
         { "developerInstructions", KICHAD::CODEX_AGENT_POLICY::DeveloperInstructions() },
         { "config", KICHAD::CODEX_AGENT_POLICY::ThreadConfig() }
     };
@@ -793,6 +804,7 @@ void CODEX_PANEL::startTurn( const std::string& aMessage )
                 {
                     m_turnId = aResponse["result"]["turn"].value( "id", "" );
                     persistConversation();
+                    appendDialogLog( wxS( "USER" ), aMessage );
                 }
                 else
                 {
@@ -1049,10 +1061,51 @@ bool CODEX_PANEL::handleGoalCommand( const wxString& aMessage )
 }
 
 
+void CODEX_PANEL::RefreshExternalLayoutSettings()
+{
+    bool     mode = false;
+    wxString tool;
+    int      layers = 2;
+
+    if( KICAD_SETTINGS* settings = GetAppSettings<KICAD_SETTINGS>( "kicad" ) )
+    {
+        mode = settings->m_CodexExternalLayoutMode;
+        tool = settings->m_CodexExternalLayoutTool;
+        layers = settings->m_CodexExternalLayoutLayers;
+    }
+
+    m_externalLayoutMode = mode;
+    m_toolRegistry.SetExternalLayoutTool( tool );
+    m_toolRegistry.SetExternalLayoutLayers( layers );
+}
+
+
 void CODEX_PANEL::appendTranscript( const wxString& aText )
 {
     m_transcript->AppendText( aText );
     m_transcript->ShowPosition( m_transcript->GetLastPosition() );
+}
+
+
+void CODEX_PANEL::appendDialogLog( const wxString& aRole, const std::string& aText )
+{
+    // Only log into a real project directory; skip the cwd fallback used elsewhere so no
+    // stray codex_dialog.txt appears outside a project.
+    wxString dir = m_projectPathProvider ? m_projectPathProvider() : wxString();
+
+    if( dir.IsEmpty() || !wxFileName::DirExists( dir ) )
+        return;
+
+    wxFFile file( wxFileName( dir, wxS( "codex_dialog.txt" ) ).GetFullPath(), wxS( "ab" ) );
+
+    if( !file.IsOpened() )
+        return;
+
+    const wxString entry =
+            wxString::Format( wxS( "[%s] %s:\n%s\n\n" ),
+                              wxDateTime::Now().Format( wxS( "%Y-%m-%d %H:%M:%S" ) ), aRole,
+                              wxString::FromUTF8( aText ) );
+    file.Write( entry, wxConvUTF8 );
 }
 
 
@@ -1430,6 +1483,7 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
         if( !m_currentAgentMessage.empty() )
         {
             m_conversationHistory.push_back( { "assistant", m_currentAgentMessage } );
+            appendDialogLog( wxS( "CODEX" ), m_currentAgentMessage );
             m_currentAgentMessage.clear();
         }
 
@@ -1909,16 +1963,24 @@ void CODEX_PANEL::onSend( wxCommandEvent& aEvent )
         return;
 
     m_input->Clear();
+    submitUserMessage( message );
+}
+
+
+bool CODEX_PANEL::submitUserMessage( const wxString& aMessage )
+{
+    const wxString& message = aMessage;
+
     appendTranscript( wxString::Format( _( "\nYou: %s\n" ), message ) );
 
     if( handleGoalCommand( message ) )
-        return;
+        return false;
 
     if( !m_turnId.empty() )
     {
         appendTranscript( _( "[Codex is still working. Use /goal pause, /goal clear, or Stop "
                              "before starting another request.]\n" ) );
-        return;
+        return false;
     }
 
     m_turnSnapshotHash.clear();
@@ -1941,6 +2003,7 @@ void CODEX_PANEL::onSend( wxCommandEvent& aEvent )
 
     std::string utf8Message( message.ToUTF8() );
     ensureThreadLoaded( message, [this, utf8Message]() { startTurn( utf8Message ); } );
+    return true;
 }
 
 

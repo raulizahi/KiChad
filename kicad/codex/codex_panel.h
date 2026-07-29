@@ -97,7 +97,14 @@ private:
     bool ensureRuntimeDependency( const CODEX_TOOL_REGISTRY::RUNTIME_DEPENDENCY& aDependency,
                                   std::string& aError );
     void selectProjectThread();
+public:
+    /// Re-read the external-layout preferences (mode + tool path) from KICAD_SETTINGS.
+    void RefreshExternalLayoutSettings();
+
+private:
     void appendTranscript( const wxString& aText );
+    void appendDialogLog( const wxString& aRole, const std::string& aText );
+    bool submitUserMessage( const wxString& aMessage );
     void setBusy( bool aBusy );
     void setLoginPending( bool aPending );
     void setStatus( const wxString& aStatus );
@@ -140,6 +147,7 @@ private:
     wxButton*                 m_newConversationButton;
     std::vector<JSON>         m_models;
     std::vector<CODEX_THREAD_STORE::MESSAGE> m_conversationHistory;
+    bool                      m_externalLayoutMode;
     std::string               m_threadId;
     std::string               m_savedThreadId;
     std::string               m_loginId;
