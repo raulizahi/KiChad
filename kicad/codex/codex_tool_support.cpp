@@ -2085,16 +2085,13 @@ JSON buildFabricationPlan( const JSON& aIr, const std::string& aFileStem )
 
     for( const JSON& net : aIr.at( "schematic" ).at( "nets" ) )
     {
-        const std::string name = net.value( "name", "" );
-        const std::string presentation = net.value( "presentation", "labels" );
-
-        if( presentation == "wired" )
+        if( net.value( "presentation", "labels" ) == "wired" )
             ++wiredNetCount;
         else
             ++labelNetCount;
 
         if( !net.value( "presentationExplicit", false ) )
-            implicitPresentationNets.push_back( name );
+            implicitPresentationNets.push_back( net.value( "name", "" ) );
     }
 
     if( !implicitPresentationNets.empty() )
@@ -2108,20 +2105,8 @@ JSON buildFabricationPlan( const JSON& aIr, const std::string& aFileStem )
                     "not reviewable design intent" },
                   { "nets", implicitPresentationNets },
                   { "recovery",
-                    "Use wired for same-sheet circuits that must be visually inspectable and "
-                    "labels for deliberate global, power, or cross-sheet connectivity." } } );
-    }
-
-    if( !aIr.at( "schematic" ).at( "nets" ).empty() && wiredNetCount == 0 )
-    {
-        issues.push_back(
-                { { "type", "label_only_schematic" },
-                  { "severity", "error" },
-                  { "description",
-                    "The schematic has electrical nets but no reviewable generated wire paths" },
-                  { "recovery",
-                    "Declare (presentation wired) on same-sheet signal nets, apply the KDS, and "
-                    "review the rendered schematic before release." } } );
+                    "Prefer (presentation labels); use (presentation wired) only for short "
+                    "local connections whose generated wires stay clear of symbols." } } );
     }
 
     KICHAD::DESIGN_SCRIPT_LAYOUT_ANALYZER::RESULT layout =
