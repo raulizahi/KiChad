@@ -11,8 +11,13 @@
 
 #include "codex_tool_registry.h"
 #include "codex_tool_internal.h"
+#include "lossless_sexpr_document.h"
 
 #include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <limits>
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
@@ -98,6 +103,352 @@ bool resolveExternalTool( const wxString& aConfiguredPath, wxFileName& aTool,
 }
 
 
+std::string formatMm( double aMm )
+{
+    char buffer[64];
+    std::snprintf( buffer, sizeof( buffer ), "%.6f", aMm );
+    std::string text( buffer );
+
+    while( !text.empty() && text.back() == '0' )
+        text.pop_back();
+
+    if( !text.empty() && text.back() == '.' )
+        text.pop_back();
+
+    return text + "mm";
+}
+
+
+std::string quoteKds( const std::string& aValue )
+{
+    std::string quoted = "\"";
+
+    for( char c : aValue )
+    {
+        if( c == '"' || c == '\\' )
+            quoted += '\\';
+
+        quoted += c;
+    }
+
+    return quoted + "\"";
+}
+
+
+struct BOARD_EXTRACT
+{
+    struct PLACEMENT
+    {
+        std::string reference;
+        double      x = 0.0;
+        double      y = 0.0;
+        double      rotation = 0.0;
+        bool        back = false;
+    };
+
+    struct TRACK
+    {
+        std::string net;
+        double      x1 = 0.0, y1 = 0.0;
+        bool        hasMid = false;
+        double      xm = 0.0, ym = 0.0;
+        double      x2 = 0.0, y2 = 0.0;
+        double      width = 0.0;
+        std::string layer;
+    };
+
+    struct VIA
+    {
+        std::string net;
+        double      x = 0.0, y = 0.0;
+        double      drill = 0.0;
+        double      diameter = 0.0;
+        std::string startLayer;
+        std::string endLayer;
+    };
+
+    std::vector<PLACEMENT>   placements;
+    std::vector<TRACK>       tracks;
+    std::vector<VIA>         vias;
+    std::vector<std::string> copperLayers;
+    double                   edgeMinX = std::numeric_limits<double>::max();
+    double                   edgeMinY = std::numeric_limits<double>::max();
+    double                   edgeMaxX = std::numeric_limits<double>::lowest();
+    double                   edgeMaxY = std::numeric_limits<double>::lowest();
+    bool                     hasEdge = false;
+    size_t                   skippedNoNet = 0;
+    size_t                   skippedZones = 0;
+};
+
+
+bool extractRoutedBoard( const KICHAD::LOSSLESS_SEXPR_DOCUMENT& aDoc, BOARD_EXTRACT& aOut,
+                         std::string& aError )
+{
+    using DOC = KICHAD::LOSSLESS_SEXPR_DOCUMENT;
+
+    const auto& nodes = aDoc.Nodes();
+
+    if( aDoc.Roots().size() != 1 || aDoc.ListHead( aDoc.Roots()[0] ) != "kicad_pcb" )
+    {
+        aError = "the adopted board is not a kicad_pcb document";
+        return false;
+    }
+
+    const size_t root = aDoc.Roots()[0];
+
+    const auto childValues = [&]( size_t aList ) -> std::vector<std::string>
+    {
+        std::vector<std::string> values;
+
+        for( size_t child : nodes[aList].children )
+        {
+            if( nodes[child].kind != DOC::NODE_KIND::LIST )
+                values.push_back( aDoc.AtomText( child ) );
+        }
+
+        return values;
+    };
+
+    const auto findChildList = [&]( size_t aList, const std::string& aHead ) -> size_t
+    {
+        for( size_t child : nodes[aList].children )
+        {
+            if( nodes[child].kind == DOC::NODE_KIND::LIST && aDoc.ListHead( child ) == aHead )
+                return child;
+        }
+
+        return DOC::NO_NODE;
+    };
+
+    const auto numberAt = [&]( size_t aList, size_t aIndex, double& aValue ) -> bool
+    {
+        const std::vector<std::string> values = childValues( aList );
+
+        if( aIndex + 1 >= values.size() )
+            return false;
+
+        try
+        {
+            aValue = std::stod( values[aIndex + 1] );
+        }
+        catch( ... )
+        {
+            return false;
+        }
+
+        return true;
+    };
+
+    std::map<std::string, std::string> netNames;
+
+    for( size_t child : nodes[root].children )
+    {
+        if( nodes[child].kind != DOC::NODE_KIND::LIST )
+            continue;
+
+        const std::string head = aDoc.ListHead( child );
+
+        if( head == "net" )
+        {
+            const std::vector<std::string> values = childValues( child );
+
+            if( values.size() >= 3 )
+                netNames[values[1]] = values[2];
+        }
+        else if( head == "layers" )
+        {
+            for( size_t entry : nodes[child].children )
+            {
+                if( nodes[entry].kind != DOC::NODE_KIND::LIST )
+                    continue;
+
+                const std::vector<std::string> values = childValues( entry );
+
+                if( values.size() >= 3 && values[1].size() > 3
+                    && values[1].compare( values[1].size() - 3, 3, ".Cu" ) == 0
+                    && values[2] == "signal" )
+                {
+                    aOut.copperLayers.push_back( values[1] );
+                }
+            }
+        }
+    }
+
+    const auto netName = [&]( size_t aList ) -> std::string
+    {
+        const size_t netNode = findChildList( aList, "net" );
+
+        if( netNode == DOC::NO_NODE )
+            return std::string();
+
+        const std::vector<std::string> values = childValues( netNode );
+
+        if( values.size() < 2 )
+            return std::string();
+
+        // KiCad writes net references by table number; some external tools write the
+        // net name directly. Accept both.
+        const auto mapped = netNames.find( values[1] );
+        return mapped != netNames.end() ? mapped->second : values[1];
+    };
+
+    for( size_t child : nodes[root].children )
+    {
+        if( nodes[child].kind != DOC::NODE_KIND::LIST )
+            continue;
+
+        const std::string head = aDoc.ListHead( child );
+
+        if( head == "footprint" )
+        {
+            BOARD_EXTRACT::PLACEMENT placement;
+
+            for( size_t sub : nodes[child].children )
+            {
+                if( nodes[sub].kind != DOC::NODE_KIND::LIST )
+                    continue;
+
+                const std::string subHead = aDoc.ListHead( sub );
+                const std::vector<std::string> values = childValues( sub );
+
+                if( subHead == "property" && values.size() >= 3 && values[1] == "Reference" )
+                    placement.reference = values[2];
+                else if( subHead == "layer" && values.size() >= 2 )
+                    placement.back = values[1] == "B.Cu";
+                else if( subHead == "at" && nodes[sub].parent == child )
+                {
+                    numberAt( sub, 0, placement.x );
+                    numberAt( sub, 1, placement.y );
+
+                    if( values.size() >= 4 )
+                        numberAt( sub, 2, placement.rotation );
+                }
+            }
+
+            if( !placement.reference.empty() )
+                aOut.placements.push_back( placement );
+        }
+        else if( head == "segment" || head == "arc" )
+        {
+            BOARD_EXTRACT::TRACK track;
+            track.net = netName( child );
+
+            if( track.net.empty() )
+            {
+                ++aOut.skippedNoNet;
+                continue;
+            }
+
+            const size_t start = findChildList( child, "start" );
+            const size_t mid = findChildList( child, "mid" );
+            const size_t end = findChildList( child, "end" );
+            const size_t width = findChildList( child, "width" );
+            const size_t layer = findChildList( child, "layer" );
+
+            if( start == DOC::NO_NODE || end == DOC::NO_NODE || width == DOC::NO_NODE
+                || layer == DOC::NO_NODE )
+            {
+                continue;
+            }
+
+            numberAt( start, 0, track.x1 );
+            numberAt( start, 1, track.y1 );
+            numberAt( end, 0, track.x2 );
+            numberAt( end, 1, track.y2 );
+            numberAt( width, 0, track.width );
+            track.layer = childValues( layer ).size() >= 2 ? childValues( layer )[1]
+                                                           : std::string();
+
+            if( mid != DOC::NO_NODE )
+            {
+                track.hasMid = true;
+                numberAt( mid, 0, track.xm );
+                numberAt( mid, 1, track.ym );
+            }
+
+            aOut.tracks.push_back( track );
+        }
+        else if( head == "via" )
+        {
+            BOARD_EXTRACT::VIA via;
+            via.net = netName( child );
+
+            if( via.net.empty() )
+            {
+                ++aOut.skippedNoNet;
+                continue;
+            }
+
+            const size_t at = findChildList( child, "at" );
+            const size_t size = findChildList( child, "size" );
+            const size_t drill = findChildList( child, "drill" );
+            const size_t layers = findChildList( child, "layers" );
+
+            if( at == DOC::NO_NODE || size == DOC::NO_NODE || drill == DOC::NO_NODE )
+                continue;
+
+            numberAt( at, 0, via.x );
+            numberAt( at, 1, via.y );
+            numberAt( size, 0, via.diameter );
+            numberAt( drill, 0, via.drill );
+
+            if( layers != DOC::NO_NODE )
+            {
+                const std::vector<std::string> values = childValues( layers );
+
+                if( values.size() >= 3 )
+                {
+                    via.startLayer = values[1];
+                    via.endLayer = values[2];
+                }
+            }
+
+            aOut.vias.push_back( via );
+        }
+        else if( head == "zone" )
+        {
+            ++aOut.skippedZones;
+        }
+        else if( head.rfind( "gr_", 0 ) == 0 )
+        {
+            const size_t layer = findChildList( child, "layer" );
+
+            if( layer == DOC::NO_NODE || childValues( layer ).size() < 2
+                || childValues( layer )[1] != "Edge.Cuts" )
+            {
+                continue;
+            }
+
+            for( const char* pointHead : { "start", "end", "mid", "center" } )
+            {
+                const size_t point = findChildList( child, pointHead );
+
+                if( point == DOC::NO_NODE )
+                    continue;
+
+                double x = 0.0, y = 0.0;
+
+                if( numberAt( point, 0, x ) && numberAt( point, 1, y ) )
+                {
+                    aOut.hasEdge = true;
+                    aOut.edgeMinX = std::min( aOut.edgeMinX, x );
+                    aOut.edgeMinY = std::min( aOut.edgeMinY, y );
+                    aOut.edgeMaxX = std::max( aOut.edgeMaxX, x );
+                    aOut.edgeMaxY = std::max( aOut.edgeMaxY, y );
+                }
+            }
+        }
+    }
+
+    if( aOut.placements.empty() )
+    {
+        aError = "the adopted board contains no referenced footprints";
+        return false;
+    }
+
+    return true;
+}
+
 wxString defaultOutputDirectoryName( const wxFileName& aProjectDirectory )
 {
     // Mirror the staging convention: Foo-no-layout hands off to Foo; anything else
@@ -124,7 +475,8 @@ nlohmann::json LayoutSpec()
                               { "required", nlohmann::json::array( { "operation" } ) } };
     schema["properties"]["operation"] =
             { { "type", "string" },
-              { "enum", nlohmann::json::array( { "status", "run", "adopt", "revert" } ) } };
+              { "enum", nlohmann::json::array(
+                                { "status", "run", "adopt", "revert", "reconcile" } ) } };
     schema["properties"]["outputDirName"] =
             { { "type", "string" }, { "maxLength", 255 },
               { "description",
@@ -158,7 +510,13 @@ nlohmann::json LayoutSpec()
                "hold the board open (or must reload it afterward). Adopting twice without a "
                "revert replaces the saved pre-layout board with the previously adopted one, "
                "so re-stage before adopting again. After adopt, render and inspect the "
-               "result, then run DRC and the remaining gates; revert if it is rejected." },
+               "result, then run DRC and the remaining gates; revert if it is rejected. "
+               "Operation reconcile back-annotates the adopted routed board into the KDS: it "
+               "replaces the KDS outline, placements, routes, and vias with the board's "
+               "actual geometry as authored statements, validates by compiling, and restores "
+               "the previous KDS if compilation fails. After a successful reconcile the KDS "
+               "is the single source of truth again and design.apply no longer erases the "
+               "routing. Copper zones are not imported and are reported as skipped." },
              { "inputSchema", std::move( schema ) } };
 }
 
@@ -178,10 +536,10 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
     const std::string operation = aArguments["operation"].get<std::string>();
 
     if( operation != "status" && operation != "run" && operation != "adopt"
-        && operation != "revert" )
+        && operation != "revert" && operation != "reconcile" )
     {
         return failure( "invalid_arguments",
-                        "layout.operation must be status, run, adopt, or revert" );
+                        "layout.operation must be status, run, adopt, revert, or reconcile" );
     }
 
     if( aProjectPath.IsEmpty() || !wxFileName::DirExists( aProjectPath ) )
@@ -381,6 +739,265 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
 
         return success( { { "revertedBoard", savedName.ToUTF8().data() },
                           { "preLayoutBackup", backup.GetFullPath().ToUTF8().data() } } );
+    }
+
+    if( operation == "reconcile" )
+    {
+        if( !aMutationAvailable )
+        {
+            return failure( "snapshot_required",
+                            "A complete pre-turn project snapshot is required to reconcile the "
+                            "routed board into the KDS" );
+        }
+
+        const auto singleFile = [&]( const wxString& aPattern, wxString& aName,
+                                     const char* aWhat ) -> JSON
+        {
+            wxDir dir( projectDirectory.GetFullPath() );
+            wxString extra;
+
+            if( !dir.IsOpened() || !dir.GetFirst( &aName, aPattern, wxDIR_FILES ) )
+                return failure( "invalid_arguments",
+                                std::string( "the active project contains no " ) + aWhat );
+
+            if( dir.GetNext( &extra ) )
+                return failure( "invalid_arguments",
+                                std::string( "the active project contains more than one " )
+                                        + aWhat );
+
+            return JSON();
+        };
+
+        wxString boardName, kdsName;
+
+        if( JSON error = singleFile( wxS( "*.kicad_pcb" ), boardName, ".kicad_pcb board" );
+            !error.is_null() )
+            return error;
+
+        if( JSON error = singleFile( wxS( "*.kicad_kds" ), kdsName, ".kicad_kds design" );
+            !error.is_null() )
+            return error;
+
+        const auto readAll = [&]( const wxFileName& aPath, std::string& aText ) -> bool
+        {
+            wxFile file( aPath.GetFullPath(), wxFile::read );
+            const wxFileOffset length = file.IsOpened() ? file.Length() : -1;
+
+            if( length < 0 || length > 64 * 1024 * 1024 )
+                return false;
+
+            aText.resize( static_cast<size_t>( length ) );
+            return file.Read( aText.data(), aText.size() )
+                   == static_cast<ssize_t>( aText.size() );
+        };
+
+        const wxFileName boardPath( projectDirectory.GetFullPath(), boardName );
+        const wxFileName kdsPath( projectDirectory.GetFullPath(), kdsName );
+        std::string boardText, kdsText, parseError;
+
+        if( !readAll( boardPath, boardText ) )
+            return failure( "read_failed", "could not read the adopted board file" );
+
+        if( !readAll( kdsPath, kdsText ) )
+            return failure( "read_failed", "could not read the KDS design file" );
+
+        auto boardDoc = KICHAD::LOSSLESS_SEXPR_DOCUMENT::Parse( std::move( boardText ),
+                                                                &parseError );
+
+        if( !boardDoc )
+            return failure( "parse_failed", "could not parse the adopted board: " + parseError );
+
+        BOARD_EXTRACT extract;
+        std::string extractError;
+
+        if( !extractRoutedBoard( *boardDoc, extract, extractError ) )
+            return failure( "invalid_output", extractError );
+
+        if( !extract.hasEdge )
+            return failure( "invalid_output", "the adopted board has no Edge.Cuts outline" );
+
+        auto kdsDoc = KICHAD::LOSSLESS_SEXPR_DOCUMENT::Parse( std::move( kdsText ),
+                                                              &parseError );
+
+        if( !kdsDoc )
+            return failure( "parse_failed", "could not parse the KDS design: " + parseError );
+
+        const auto& kdsNodes = kdsDoc->Nodes();
+        size_t boardList = KICHAD::LOSSLESS_SEXPR_DOCUMENT::NO_NODE;
+
+        for( size_t rootNode : kdsDoc->Roots() )
+        {
+            if( kdsNodes[rootNode].kind == KICHAD::LOSSLESS_SEXPR_DOCUMENT::NODE_KIND::LIST
+                && kdsDoc->ListHead( rootNode ) == "board" )
+            {
+                boardList = rootNode;
+                break;
+            }
+        }
+
+        if( boardList == KICHAD::LOSSLESS_SEXPR_DOCUMENT::NO_NODE )
+            return failure( "invalid_source", "the KDS design has no top-level (board ...)" );
+
+        std::string editError;
+        size_t existingOutline = KICHAD::LOSSLESS_SEXPR_DOCUMENT::NO_NODE;
+        size_t existingStackup = KICHAD::LOSSLESS_SEXPR_DOCUMENT::NO_NODE;
+
+        for( size_t child : kdsNodes[boardList].children )
+        {
+            if( kdsNodes[child].kind != KICHAD::LOSSLESS_SEXPR_DOCUMENT::NODE_KIND::LIST )
+                continue;
+
+            const std::string head = kdsDoc->ListHead( child );
+
+            if( head == "place" || head == "route" || head == "via" )
+            {
+                if( !kdsDoc->RemoveNode( child, &editError ) )
+                    return failure( "write_failed", "KDS edit failed: " + editError );
+            }
+            else if( head == "outline" )
+            {
+                existingOutline = child;
+            }
+            else if( head == "stackup" )
+            {
+                existingStackup = child;
+            }
+        }
+
+        const std::string outlineText =
+                "(outline (rectangle pcb_outline (start " + formatMm( extract.edgeMinX ) + " "
+                + formatMm( extract.edgeMinY ) + ") (end " + formatMm( extract.edgeMaxX ) + " "
+                + formatMm( extract.edgeMaxY )
+                + ") (stroke 0.25mm solid) (layers Edge.Cuts) (fill none)))";
+
+        if( existingOutline != KICHAD::LOSSLESS_SEXPR_DOCUMENT::NO_NODE )
+        {
+            if( !kdsDoc->ReplaceNode( existingOutline, outlineText, &editError ) )
+                return failure( "write_failed", "KDS edit failed: " + editError );
+        }
+
+        std::string statements;
+
+        if( existingOutline == KICHAD::LOSSLESS_SEXPR_DOCUMENT::NO_NODE )
+            statements += "\n  " + outlineText;
+
+        if( extract.copperLayers.size() > 2
+            && existingStackup == KICHAD::LOSSLESS_SEXPR_DOCUMENT::NO_NODE )
+        {
+            statements += "\n  (stackup custom (layers";
+
+            for( const std::string& layer : extract.copperLayers )
+                statements += " " + layer;
+
+            statements += "))";
+        }
+
+        for( const BOARD_EXTRACT::PLACEMENT& placement : extract.placements )
+        {
+            statements += "\n  (place " + placement.reference + " (at "
+                          + formatMm( placement.x ) + " " + formatMm( placement.y ) + ")";
+
+            if( placement.rotation != 0.0 )
+            {
+                std::string angle = formatMm( placement.rotation );
+                angle.replace( angle.size() - 2, 2, "deg" );
+                statements += " (rotation " + angle + ")";
+            }
+
+            if( placement.back )
+                statements += " (side back)";
+
+            statements += ")";
+        }
+
+        size_t identifier = 0;
+
+        for( const BOARD_EXTRACT::TRACK& track : extract.tracks )
+        {
+            statements += "\n  (route " + quoteKds( track.net ) + " (id klrt"
+                          + std::to_string( ++identifier ) + ") (from " + formatMm( track.x1 )
+                          + " " + formatMm( track.y1 ) + ")";
+
+            if( track.hasMid )
+                statements += " (mid " + formatMm( track.xm ) + " " + formatMm( track.ym ) + ")";
+
+            statements += " (to " + formatMm( track.x2 ) + " " + formatMm( track.y2 )
+                          + ") (width " + formatMm( track.width ) + ") (layer " + track.layer
+                          + "))";
+        }
+
+        for( const BOARD_EXTRACT::VIA& via : extract.vias )
+        {
+            statements += "\n  (via " + quoteKds( via.net ) + " (id klvi"
+                          + std::to_string( ++identifier ) + ") (at " + formatMm( via.x ) + " "
+                          + formatMm( via.y ) + ") (drill " + formatMm( via.drill )
+                          + ") (diameter " + formatMm( via.diameter ) + ")";
+
+            if( !via.startLayer.empty() && !via.endLayer.empty() )
+                statements += " (layers " + via.startLayer + " " + via.endLayer + ")";
+
+            statements += ")";
+        }
+
+        statements += "\n";
+
+        if( !kdsDoc->InsertBeforeClosingList( boardList, statements, &editError ) )
+            return failure( "write_failed", "KDS edit failed: " + editError );
+
+        std::string rendered;
+
+        if( !kdsDoc->Render( rendered, &editError ) )
+            return failure( "write_failed", "KDS render failed: " + editError );
+
+        // Back up the current KDS, write the reconciled one, and validate by compiling;
+        // restore the backup if the compiler rejects the generated statements.
+        wxFileName backupDir = wxFileName::DirName( projectDirectory.GetFullPath() );
+        backupDir.AppendDir( wxS( ".kichad" ) );
+        backupDir.AppendDir( wxS( "pre-layout" ) );
+
+        if( !backupDir.DirExists()
+            && !wxFileName::Mkdir( backupDir.GetFullPath(), 0755, wxPATH_MKDIR_FULL ) )
+        {
+            return failure( "write_failed", "could not create the pre-layout backup directory" );
+        }
+
+        const wxFileName kdsBackup( backupDir.GetFullPath(), kdsName );
+
+        if( !wxCopyFile( kdsPath.GetFullPath(), kdsBackup.GetFullPath(), true ) )
+            return failure( "write_failed", "could not back up the KDS before reconciling" );
+
+        {
+            wxFile out( kdsPath.GetFullPath(), wxFile::write );
+
+            if( !out.IsOpened() || out.Write( rendered.data(), rendered.size() )
+                                           != rendered.size() )
+            {
+                wxCopyFile( kdsBackup.GetFullPath(), kdsPath.GetFullPath(), true );
+                return failure( "write_failed", "could not write the reconciled KDS" );
+            }
+        }
+
+        const JSON compileResult = handleDesign(
+                { { "operation", "compile" }, { "path", std::string( kdsName.ToUTF8() ) } },
+                aProjectPath, false, wxString(), std::chrono::milliseconds( 2000 ), {} );
+
+        if( !compileResult.value( "success", false ) )
+        {
+            wxCopyFile( kdsBackup.GetFullPath(), kdsPath.GetFullPath(), true );
+            JSON details = { { "compile", compileResult } };
+            return failure( "compile_failed",
+                            "the reconciled KDS did not compile; the previous KDS was restored",
+                            details );
+        }
+
+        return success( { { "kds", kdsName.ToUTF8().data() },
+                          { "placements", extract.placements.size() },
+                          { "routes", extract.tracks.size() },
+                          { "vias", extract.vias.size() },
+                          { "copperLayers", extract.copperLayers.size() },
+                          { "skippedZones", extract.skippedZones },
+                          { "skippedNoNetItems", extract.skippedNoNet },
+                          { "kdsBackup", kdsBackup.GetFullPath().ToUTF8().data() } } );
     }
 
     if( !configured )
