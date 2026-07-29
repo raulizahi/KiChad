@@ -100,7 +100,10 @@ const char* ExternalLayoutPolicy()
            "state is complete and clean, then layout.adopt to bring the routed board into the "
            "project for review. Render and inspect the adopted result and run DRC and the "
            "remaining gates; if the routed board is rejected, layout.revert restores the "
-           "staged pre-layout board.";
+           "staged pre-layout board. As soon as the adopted board is accepted, immediately run "
+           "layout.reconcile, recompile, and apply so the KDS reflects the routed reality; do "
+           "not wait to be asked, and verify the applied board preserves the routed track and "
+           "via counts.";
 }
 
 
