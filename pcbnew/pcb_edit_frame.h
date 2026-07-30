@@ -603,6 +603,13 @@ public:
     bool FetchNetlistFromSchematic( NETLIST& aNetlist, const wxString& aAnnotateMessage );
 
     /**
+     * Fetch the netlist from the project's on-disk schematic, ignoring any in-memory state
+     * held by an open schematic editor.  Used by schematic parity DRC so it always compares
+     * against the schematic as saved.
+     */
+    bool FetchNetlistFromDiskSchematic( NETLIST& aNetlist, wxString& aError );
+
+    /**
      * Test if standalone mode.
      *
      * @return 0 if in standalone, -1 if Eeschema cannot be opened,

@@ -21,6 +21,7 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
  */
 
+#include <confirm.h>
 #include <pcb_edit_frame.h>
 #include <tool/tool_manager.h>
 #include <tools/pcb_actions.h>
@@ -166,11 +167,20 @@ void DRC_TOOL::RunTests( PROGRESS_REPORTER* aProgressReporter, bool aRefillZones
 
         if( aTestFootprints && !Kiface().IsSingle() )
         {
-            if( m_editFrame->FetchNetlistFromSchematic( netlist,
-                                                        _( "Schematic parity tests require a "
-                                                           "fully annotated schematic." ) ) )
+            // Parity always compares against the schematic as saved on disk, not the
+            // in-memory state of an open schematic editor, so results match kicad-cli
+            // and do not depend on editor session staleness.
+            wxString fetchError;
+
+            if( m_editFrame->FetchNetlistFromDiskSchematic( netlist, fetchError ) )
             {
                 netlistFetched = true;
+            }
+            else
+            {
+                DisplayErrorMessage( m_editFrame,
+                                     _( "Schematic parity was skipped:" ) + wxS( "\n" )
+                                             + fetchError );
             }
 
             if( m_drcDialog )

@@ -119,6 +119,7 @@
 #include <autorouter/autoplace_tool.h>
 #include <python/scripting/pcb_scripting_tool.h>
 #include <netlist_reader/netlist_reader.h>
+#include <jobs/job_export_sch_netlist.h>
 #include <dialog_drc.h>     // for DIALOG_DRC_WINDOW_NAME definition
 #include <ratsnest/ratsnest_view_item.h>
 #include <widgets/appearance_controls.h>
@@ -2349,6 +2350,52 @@ int PCB_EDIT_FRAME::TestStandalone()
     }
 
     return 1;            //Success!
+}
+
+
+bool PCB_EDIT_FRAME::FetchNetlistFromDiskSchematic( NETLIST& aNetlist, wxString& aError )
+{
+    wxFileName schPath( Prj().GetProjectPath(), Prj().GetProjectName(),
+                        FILEEXT::KiCadSchematicFileExtension );
+
+    if( !schPath.FileExists() )
+    {
+        aError = wxString::Format( _( "Schematic file '%s' was not found." ),
+                                   schPath.GetFullPath() );
+        return false;
+    }
+
+    const wxString tempPath = wxFileName::CreateTempFileName( wxS( "kichad-parity" ) );
+
+    JOB_EXPORT_SCH_NETLIST job;
+    job.m_filename = schPath.GetFullPath();
+    job.format = JOB_EXPORT_SCH_NETLIST::FORMAT::KICADSEXPR;
+    job.SetConfiguredOutputPath( tempPath );
+
+    if( Kiway().ProcessJob( KIWAY::FACE_SCH, &job ) != 0 )
+    {
+        wxRemoveFile( tempPath );
+        aError = wxString::Format( _( "Could not export a netlist from '%s'." ),
+                                   schPath.GetFullPath() );
+        return false;
+    }
+
+    bool loaded = true;
+
+    try
+    {
+        KICAD_NETLIST_READER netlistReader( new FILE_LINE_READER( tempPath ), &aNetlist );
+        netlistReader.LoadNetlist();
+    }
+    catch( const IO_ERROR& e )
+    {
+        aError = wxString::Format( _( "Error loading netlist from the schematic:\n%s" ),
+                                   e.What() );
+        loaded = false;
+    }
+
+    wxRemoveFile( tempPath );
+    return loaded;
 }
 
 
