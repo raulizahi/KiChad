@@ -53,7 +53,7 @@ public:
                                 const wxFileName&, int, std::string& )>;
     // Bump whenever the model-visible tool or capability contract changes so a project cannot
     // resume a persistent thread created with a broader or incompatible surface.
-    static constexpr int SCHEMA_VERSION = 16;
+    static constexpr int SCHEMA_VERSION = 17;
 
     explicit CODEX_TOOL_REGISTRY( std::function<wxString()> aProjectPathProvider,
                                   std::function<bool()> aMutationGuard = {},

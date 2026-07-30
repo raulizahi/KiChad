@@ -516,7 +516,10 @@ nlohmann::json LayoutSpec()
                "actual geometry as authored statements, validates by compiling, and restores "
                "the previous KDS if compilation fails. After a successful reconcile the KDS "
                "is the single source of truth again and design.apply no longer erases the "
-               "routing. Copper zones are not imported and are reported as skipped." },
+               "routing. Copper zones are not imported and are reported as skipped. When the "
+               "external tool writes a verdict JSON beside the output board, run returns it "
+               "in the response; gate the drc, layout, and fabrication checks on that verdict "
+               "data rather than log text." },
              { "inputSchema", std::move( schema ) } };
 }
 
@@ -1147,7 +1150,48 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
     JSON payload = { { "outputDirectory", outputDirectory.GetFullPath().ToUTF8().data() },
                      { "board", boardFile.ToUTF8().data() },
                      { "exitCode", exitCode },
-                     { "elapsedMs", elapsed.count() } };
+                     { "elapsedMs", elapsed.count() },
+                     { "verdict", nullptr } };
+
+    // The external tool emits a machine-readable run verdict beside the output board
+    // (DRC counts, gates, SI budget, generated outputs). Attach it so KiChad's checks
+    // gate on data instead of scraping logs.
+    wxDir verdictDir( outputDirectory.GetFullPath() );
+    wxString verdictName;
+    bool verdictFound = verdictDir.IsOpened()
+                        && verdictDir.GetFirst( &verdictName, wxS( "*verdict*.json" ),
+                                                wxDIR_FILES );
+
+    if( verdictFound )
+    {
+        wxFile verdictFile( wxFileName( outputDirectory.GetFullPath(), verdictName )
+                                    .GetFullPath(),
+                            wxFile::read );
+        const wxFileOffset length = verdictFile.IsOpened() ? verdictFile.Length() : -1;
+
+        if( length > 0 && length <= 1024 * 1024 )
+        {
+            std::string verdictText( static_cast<size_t>( length ), '\0' );
+
+            if( verdictFile.Read( verdictText.data(), verdictText.size() )
+                == static_cast<ssize_t>( verdictText.size() ) )
+            {
+                JSON verdict = JSON::parse( verdictText, nullptr, false );
+
+                if( !verdict.is_discarded() )
+                {
+                    payload["verdict"] = std::move( verdict );
+                    payload["verdictFile"] = verdictName.ToUTF8().data();
+                }
+            }
+        }
+    }
+
+    if( payload["verdict"].is_null() )
+    {
+        payload["verdictNote"] = "no machine-readable verdict file was found beside the "
+                                 "output board; gate on native DRC and inspection instead";
+    }
 
     if( !stderrTail.empty() )
         payload["stderrTail"] = stderrTail;

@@ -7371,6 +7371,10 @@ DESIGN_SCRIPT_COMPILER::JSON DESIGN_SCRIPT_COMPILER::Describe()
                       "[(procedure TEXT)]) ... )" } },
                   { { "form",
                       "(check erc|electrical|drc|layout|sourcing|footprints|fabrication)" } },
+                  { { "form", "(fab \"NAME\")" },
+                    { "description",
+                      "Declares the fabrication vendor profile for external layout and "
+                      "fabrication tools that read the KDS directly." } },
                   { { "form",
                       "(output gerbers|drill|ipcd356|netlist|ipc2581|odbpp|pick_place|bom|step|"
                       "stepz|brep|glb|stl|u3d|xao|3d_pdf|pdf|board_ps|"
@@ -7502,6 +7506,7 @@ DESIGN_SCRIPT_COMPILER::RESULT DESIGN_SCRIPT_COMPILER::Compile( const std::strin
             { "drawings", JSON::array() }, { "busAliases", JSON::array() },
             { "groups", JSON::array() } } },
         { "pcb", JSON::array() },
+        { "fab", nullptr },
         { "synthesis", nullptr },
         { "rules", nullptr },
         { "netClasses", nullptr },
@@ -7973,6 +7978,26 @@ DESIGN_SCRIPT_COMPILER::RESULT DESIGN_SCRIPT_COMPILER::Compile( const std::strin
             }
 
             sawProduction = true;
+        }
+        else if( form == "fab" )
+        {
+            std::string vendor;
+
+            if( !parseSingleValueForm( *document, formNode, vendor ) || vendor.empty()
+                || vendor.size() > 64 )
+            {
+                diagnostic( result, "error", "invalid_fab",
+                            "fab must contain exactly one vendor profile name of at most 64 "
+                            "characters" );
+            }
+            else if( !result.ir["fab"].is_null() )
+            {
+                diagnostic( result, "error", "duplicate_fab", "fab occurs more than once" );
+            }
+            else
+            {
+                result.ir["fab"] = vendor;
+            }
         }
         else if( form == "check" )
         {

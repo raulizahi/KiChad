@@ -519,7 +519,15 @@ std::string componentExpression( const JSON& aComponent, const JSON& aUnit,
            << "    (in_bom " << ( nativeFlags.at( "inBom" ).get<bool>() ? "yes" : "no" )
            << ")\n"
            << "    (on_board "
-           << ( nativeFlags.at( "onBoard" ).get<bool>() ? "yes" : "no" ) << ")\n"
+           // A component with (footprint none) is a deliberate external/non-board part;
+           // keep it out of the board netlist so schematic parity does not expect a
+           // footprint for it.
+           << ( nativeFlags.at( "onBoard" ).get<bool>()
+                                && !( aComponent.contains( "footprint" )
+                                      && aComponent["footprint"].is_null() )
+                        ? "yes"
+                        : "no" )
+           << ")\n"
            << "    (in_pos_files "
            << ( nativeFlags.at( "inPosFiles" ).get<bool>() ? "yes" : "no" ) << ")\n"
            << "    (dnp " << ( aComponent.value( "dnp", false ) ? "yes" : "no" ) << ")\n";
