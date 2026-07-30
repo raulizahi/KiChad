@@ -2774,42 +2774,16 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
                                           + std::to_string( index );
             const std::string kind = aNoConnect ? "no_connect" : "global_label";
             const std::string uuid = stableUuid( project, "schematic_" + kind, logicalId );
-            constexpr int64_t LABEL_STUB_LENGTH_NM = 5'080'000;
-            const int64_t labelX = point.x
-                                   + ( point.labelRotation == 0
-                                               ? LABEL_STUB_LENGTH_NM
-                                               : point.labelRotation == 180
-                                                         ? -LABEL_STUB_LENGTH_NM
-                                                         : 0 );
-            const int64_t labelY = point.y
-                                   + ( point.labelRotation == 90
-                                               ? LABEL_STUB_LENGTH_NM
-                                               : point.labelRotation == 270
-                                                         ? -LABEL_STUB_LENGTH_NM
-                                                         : 0 );
+            // Anchor the label exactly on the pin endpoint. An offset anchor needs a stub
+            // wire to bridge the gap, and generated stub geometry can cross other pins or
+            // stubs and silently merge unrelated nets; a label with no stub cannot touch
+            // anything but its own pin.
             const std::string source = aNoConnect
                                                ? noConnectExpression( point.x, point.y, uuid )
-                                               : globalLabelExpression( aNetName, labelX, labelY,
+                                               : globalLabelExpression( aNetName, point.x,
+                                                                        point.y,
                                                                         point.labelRotation,
                                                                         uuid );
-
-            if( !aNoConnect )
-            {
-                const std::string stubLogicalId = "net_stub/" + aNetName + "/" + endpoint
-                                                  + "/" + std::to_string( index );
-                const std::string stubUuid =
-                        stableUuid( project, "schematic_wire", stubLogicalId );
-                const JSON stub = {
-                    { "kind", "wire" },
-                    { "from", { { "xNm", point.x }, { "yNm", point.y } } },
-                    { "to", { { "xNm", labelX }, { "yNm", labelY } } },
-                    { "stroke", { { "widthNm", 0 }, { "lineStyle", "default" } } }
-                };
-                connectivityBySheet[point.sheet].push_back(
-                        { { "kind", "wire" }, { "logicalId", stubLogicalId },
-                          { "uuid", stubUuid },
-                          { "source", schematicLineExpression( stub, stubUuid ) } } );
-            }
 
             connectivityBySheet[point.sheet].push_back(
                     { { "kind", kind }, { "logicalId", logicalId }, { "uuid", uuid },
