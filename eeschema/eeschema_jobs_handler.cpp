@@ -85,7 +85,8 @@
 
 EESCHEMA_JOBS_HANDLER::EESCHEMA_JOBS_HANDLER( KIWAY* aKiway ) :
         JOB_DISPATCHER( aKiway ),
-        m_cliSchematic( nullptr )
+        m_cliSchematic( nullptr ),
+        m_guiDiskSchematic( nullptr )
 {
     Register( "bom",
               std::bind( &EESCHEMA_JOBS_HANDLER::JobExportBom, this, std::placeholders::_1 ),
@@ -196,10 +197,24 @@ SCHEMATIC* EESCHEMA_JOBS_HANDLER::getSchematic( const wxString& aPath )
     }
     else if( Pgm().IsGUI() && Pgm().GetSettingsManager().IsProjectOpen() )
     {
-        SCH_EDIT_FRAME* editFrame = static_cast<SCH_EDIT_FRAME*>( m_kiway->Player( FRAME_SCH, false ) );
+        if( !aPath.IsEmpty() )
+        {
+            // An explicit path always loads fresh from disk so the job reflects the file
+            // as saved, whether or not a schematic editor is open.  aForceDefaultProject
+            // skips LoadSchematic's open-editor shortcut while still binding the load to
+            // the active project for library resolution.
+            delete m_guiDiskSchematic;
+            m_guiDiskSchematic = EESCHEMA_HELPERS::LoadSchematic( aPath, false, true );
+            sch = m_guiDiskSchematic;
+        }
+        else
+        {
+            SCH_EDIT_FRAME* editFrame =
+                    static_cast<SCH_EDIT_FRAME*>( m_kiway->Player( FRAME_SCH, false ) );
 
-        if( editFrame )
-            sch = &editFrame->Schematic();
+            if( editFrame )
+                sch = &editFrame->Schematic();
+        }
     }
     else if( !aPath.IsEmpty() )
     {

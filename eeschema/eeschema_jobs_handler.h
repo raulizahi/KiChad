@@ -71,6 +71,10 @@ private:
     DS_PROXY_VIEW_ITEM* getDrawingSheetProxyView( SCHEMATIC* aSch );
 
     SCHEMATIC* m_cliSchematic;
+
+    /// Fresh-from-disk schematic loaded for an explicit-path job in the GUI; owned here and
+    /// replaced on each such job so results never depend on an open editor's state.
+    SCHEMATIC* m_guiDiskSchematic;
 };
 
 #endif
