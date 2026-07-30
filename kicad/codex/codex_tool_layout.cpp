@@ -1158,9 +1158,16 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
     // gate on data instead of scraping logs.
     wxDir verdictDir( outputDirectory.GetFullPath() );
     wxString verdictName;
-    bool verdictFound = verdictDir.IsOpened()
-                        && verdictDir.GetFirst( &verdictName, wxS( "*verdict*.json" ),
-                                                wxDIR_FILES );
+    bool verdictFound = false;
+
+    for( const wxChar* pattern : { wxS( "*verdict*.json" ), wxS( "*-result.json" ) } )
+    {
+        if( verdictDir.IsOpened() && verdictDir.GetFirst( &verdictName, pattern, wxDIR_FILES ) )
+        {
+            verdictFound = true;
+            break;
+        }
+    }
 
     if( verdictFound )
     {
