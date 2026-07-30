@@ -828,18 +828,41 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
         const auto& kdsNodes = kdsDoc->Nodes();
         size_t boardList = KICHAD::LOSSLESS_SEXPR_DOCUMENT::NO_NODE;
 
+        // KDS statements normally live inside a single (kichad_design ...) root wrapper;
+        // accept a bare multi-root document as well.
+        const auto isBoard = [&]( size_t aNode )
+        {
+            return kdsNodes[aNode].kind == KICHAD::LOSSLESS_SEXPR_DOCUMENT::NODE_KIND::LIST
+                   && kdsDoc->ListHead( aNode ) == "board";
+        };
+
         for( size_t rootNode : kdsDoc->Roots() )
         {
-            if( kdsNodes[rootNode].kind == KICHAD::LOSSLESS_SEXPR_DOCUMENT::NODE_KIND::LIST
-                && kdsDoc->ListHead( rootNode ) == "board" )
+            if( isBoard( rootNode ) )
             {
                 boardList = rootNode;
                 break;
             }
+
+            if( kdsNodes[rootNode].kind == KICHAD::LOSSLESS_SEXPR_DOCUMENT::NODE_KIND::LIST
+                && kdsDoc->ListHead( rootNode ) == "kichad_design" )
+            {
+                for( size_t child : kdsNodes[rootNode].children )
+                {
+                    if( isBoard( child ) )
+                    {
+                        boardList = child;
+                        break;
+                    }
+                }
+            }
+
+            if( boardList != KICHAD::LOSSLESS_SEXPR_DOCUMENT::NO_NODE )
+                break;
         }
 
         if( boardList == KICHAD::LOSSLESS_SEXPR_DOCUMENT::NO_NODE )
-            return failure( "invalid_source", "the KDS design has no top-level (board ...)" );
+            return failure( "invalid_source", "the KDS design has no (board ...) section" );
 
         std::string editError;
         size_t existingOutline = KICHAD::LOSSLESS_SEXPR_DOCUMENT::NO_NODE;
