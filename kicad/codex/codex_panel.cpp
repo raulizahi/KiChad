@@ -1249,6 +1249,7 @@ void CODEX_PANEL::selectProjectThread()
     m_threadPreparing = false;
     m_currentAgentMessage.clear();
     m_transcript->Clear();
+    m_activity->Clear();
 
     if( !m_savedThreadId.empty() )
         setStatus( _( "Saved Codex conversation found." ) );
@@ -2087,6 +2088,7 @@ void CODEX_PANEL::onNewConversation( wxCommandEvent& aEvent )
     m_reasoningSummaryOpen = false;
     m_agentResponseOpen = false;
     m_transcript->Clear();
+    m_activity->Clear();
     appendTranscript( _( "[New conversation started. The previous context has been cleared.]\n" ) );
     setStatus( _( "New Codex conversation ready." ) );
     setBusy( false );
