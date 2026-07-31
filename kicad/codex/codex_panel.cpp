@@ -25,6 +25,7 @@
 #include <wx/filename.h>
 #include <wx/intl.h>
 #include <wx/msgdlg.h>
+#include <wx/notebook.h>
 #include <wx/sizer.h>
 #include <wx/statline.h>
 #include <wx/stattext.h>
@@ -184,6 +185,7 @@ CODEX_PANEL::CODEX_PANEL( wxWindow* aParent, std::function<wxString()> aProjectP
         m_modelChoice( nullptr ),
         m_reasoningChoice( nullptr ),
         m_transcript( nullptr ),
+        m_activity( nullptr ),
         m_input( nullptr ),
         m_sendButton( nullptr ),
         m_stopButton( nullptr ),
@@ -254,9 +256,16 @@ CODEX_PANEL::CODEX_PANEL( wxWindow* aParent, std::function<wxString()> aProjectP
 
     root->Add( new wxStaticLine( this ), 0, wxEXPAND );
 
-    m_transcript = new wxTextCtrl( this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
+    wxNotebook* transcriptBook = new wxNotebook( this, wxID_ANY );
+    m_transcript = new wxTextCtrl( transcriptBook, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                                   wxDefaultSize,
                                    wxTE_MULTILINE | wxTE_READONLY | wxTE_RICH2 | wxTE_BESTWRAP );
-    root->Add( m_transcript, 1, wxEXPAND | wxALL, FromDIP( 8 ) );
+    m_activity = new wxTextCtrl( transcriptBook, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                                 wxDefaultSize,
+                                 wxTE_MULTILINE | wxTE_READONLY | wxTE_RICH2 | wxTE_BESTWRAP );
+    transcriptBook->AddPage( m_transcript, _( "Conversation" ), true );
+    transcriptBook->AddPage( m_activity, _( "Activity" ) );
+    root->Add( transcriptBook, 1, wxEXPAND | wxALL, FromDIP( 8 ) );
 
     m_input = new wxTextCtrl( this, wxID_ANY, wxEmptyString, wxDefaultPosition,
                               FromDIP( wxSize( -1, 90 ) ), wxTE_MULTILINE | wxTE_PROCESS_ENTER );
@@ -830,7 +839,7 @@ void CODEX_PANEL::beginTurnDisplay()
     m_reasoningSummaryOpen = false;
     m_agentResponseOpen = false;
     m_currentAgentMessage.clear();
-    appendTranscript( _( "\n[Starting Codex turn...]\n" ) );
+    appendActivity( _( "\n[Starting Codex turn...]\n" ) );
     setStatus( _( "Starting Codex turn..." ) );
 }
 
@@ -840,7 +849,7 @@ void CODEX_PANEL::finishReasoningDisplay()
     if( !m_reasoningSummaryOpen )
         return;
 
-    appendTranscript( wxS( "\n" ) );
+    appendActivity( wxS( "\n" ) );
     m_reasoningSummaryOpen = false;
 }
 
@@ -1087,6 +1096,13 @@ void CODEX_PANEL::appendTranscript( const wxString& aText )
 }
 
 
+void CODEX_PANEL::appendActivity( const wxString& aText )
+{
+    m_activity->AppendText( aText );
+    m_activity->ShowPosition( m_activity->GetLastPosition() );
+}
+
+
 void CODEX_PANEL::appendDialogLog( const wxString& aRole, const std::string& aText )
 {
     // Only log into a real project directory; skip the cwd fallback used elsewhere so no
@@ -1305,11 +1321,11 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
     {
         if( !m_reasoningSummaryOpen )
         {
-            appendTranscript( _( "\nThinking: " ) );
+            appendActivity( _( "\nThinking: " ) );
             m_reasoningSummaryOpen = true;
         }
 
-        appendTranscript( wxString::FromUTF8( aMessage["params"].value( "delta", "" ) ) );
+        appendActivity( wxString::FromUTF8( aMessage["params"].value( "delta", "" ) ) );
         setStatus( _( "Codex is thinking..." ) );
     }
     else if( method == "item/reasoning/textDelta" )
@@ -1331,30 +1347,30 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
         {
             finishReasoningDisplay();
             const wxString tool = wxString::FromUTF8( item.value( "tool", "" ) );
-            appendTranscript( wxString::Format( _( "\n[tool: %s — started]\n" ),
-                                                tool ) );
+            appendActivity( wxString::Format( _( "\n[tool: %s — started]\n" ),
+                                              tool ) );
             setStatus( wxString::Format( _( "Running KiChad tool: %s..." ), tool ) );
         }
         else if( type == "webSearch" )
         {
             finishReasoningDisplay();
             const wxString query = wxString::FromUTF8( item.value( "query", "" ) );
-            appendTranscript( query.IsEmpty()
-                                      ? _( "\n[Web research started.]\n" )
-                                      : wxString::Format( _( "\n[Web research: %s]\n" ), query ) );
+            appendActivity( query.IsEmpty()
+                                    ? _( "\n[Web research started.]\n" )
+                                    : wxString::Format( _( "\n[Web research: %s]\n" ), query ) );
             setStatus( _( "Codex is researching the web..." ) );
         }
         else if( type == "imageView" )
         {
             finishReasoningDisplay();
-            appendTranscript( wxString::Format( _( "\n[Viewing image: %s]\n" ),
-                                                wxString::FromUTF8( item.value( "path", "" ) ) ) );
+            appendActivity( wxString::Format( _( "\n[Viewing image: %s]\n" ),
+                                              wxString::FromUTF8( item.value( "path", "" ) ) ) );
             setStatus( _( "Codex is inspecting an image..." ) );
         }
         else if( type == "contextCompaction" )
         {
             finishReasoningDisplay();
-            appendTranscript( _( "\n[Codex is compacting conversation context...]\n" ) );
+            appendActivity( _( "\n[Codex is compacting conversation context...]\n" ) );
             setStatus( _( "Codex is compacting context..." ) );
         }
     }
@@ -1379,20 +1395,20 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
             const wxString duration = durationMs > 0
                                               ? wxString::Format( _( ", %lld ms" ), durationMs )
                                               : wxString();
-            appendTranscript( wxString::Format( _( "[tool: %s — %s%s]\n" ), tool, status,
-                                                duration ) );
+            appendActivity( wxString::Format( _( "[tool: %s — %s%s]\n" ), tool, status,
+                                              duration ) );
             setStatus( status == wxS( "failed" )
                                ? wxString::Format( _( "KiChad tool failed: %s" ), tool )
                                : _( "Tool finished; Codex is continuing..." ) );
         }
         else if( type == "webSearch" )
         {
-            appendTranscript( _( "[Web research completed.]\n" ) );
+            appendActivity( _( "[Web research completed.]\n" ) );
             setStatus( _( "Research finished; Codex is continuing..." ) );
         }
         else if( type == "imageView" )
         {
-            appendTranscript( _( "[Image inspection completed.]\n" ) );
+            appendActivity( _( "[Image inspection completed.]\n" ) );
             setStatus( _( "Image inspected; Codex is continuing..." ) );
         }
         else if( type == "agentMessage" )
@@ -1440,7 +1456,7 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
         m_turnId = aMessage["params"]["turn"].value( "id", "" );
         m_reasoningSummaryOpen = false;
         m_agentResponseOpen = false;
-        appendTranscript( _( "[Codex turn started.]\n" ) );
+        appendActivity( _( "[Codex turn started.]\n" ) );
         setStatus( _( "Codex is working..." ) );
         setBusy( true );
     }
@@ -1499,9 +1515,10 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
         const JSON& params = aMessage.value( "params", JSON::object() );
         const wxString error = responseErrorMessage( params, _( "Unknown Codex error." ) );
         const bool willRetry = params.value( "willRetry", false );
-        appendTranscript( wxString::Format( willRetry ? _( "\n[Codex error; retrying: %s]\n" )
-                                                        : _( "\n[Codex error: %s]\n" ),
-                                            error ) );
+        if( willRetry )
+            appendActivity( wxString::Format( _( "\n[Codex error; retrying: %s]\n" ), error ) );
+        else
+            appendTranscript( wxString::Format( _( "\n[Codex error: %s]\n" ), error ) );
         setStatus( willRetry ? wxString::Format( _( "Codex error; retrying: %s" ), error )
                              : wxString::Format( _( "Codex error: %s" ), error ) );
     }
@@ -1513,16 +1530,16 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
         {
             m_client.SendError( aMessage["id"], -32602,
                                 "Native KiChad tool parameters are invalid" );
-            appendTranscript( _( "[tool result: invalid request]\n" ) );
+            appendActivity( _( "[tool result: invalid request]\n" ) );
             return;
         }
 
         const JSON& params = aMessage["params"];
         std::string tool = params.value( "tool", "" );
         JSON arguments = params.value( "arguments", JSON::object() );
-        appendTranscript( wxString::Format( _( "\n[tool request: %s %s]\n" ),
-                                            wxString::FromUTF8( tool ),
-                                            wxString::FromUTF8( arguments.dump() ) ) );
+        appendActivity( wxString::Format( _( "\n[tool request: %s %s]\n" ),
+                                          wxString::FromUTF8( tool ),
+                                          wxString::FromUTF8( arguments.dump() ) ) );
 
         // Serialize design operations so concurrent model calls cannot observe or mutate
         // partially overlapping project state.
@@ -1530,7 +1547,7 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
         {
             m_client.SendError( aMessage["id"], -32001,
                                 "Another native KiChad tool call is still running" );
-            appendTranscript( _( "[tool result: executor busy]\n" ) );
+            appendActivity( _( "[tool result: executor busy]\n" ) );
             return;
         }
 
@@ -1638,7 +1655,7 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
             m_toolRequestIds.erase( taskId );
             m_client.SendError( aMessage["id"], -32000,
                                 std::string( "Could not start native tool worker: " ) + error.what() );
-            appendTranscript( _( "[tool result: failed to start worker]\n" ) );
+            appendActivity( _( "[tool result: failed to start worker]\n" ) );
         }
     }
 }
@@ -1664,7 +1681,7 @@ void CODEX_PANEL::onRuntimeDependencyRequested( wxThreadEvent& aEvent )
                             == CODEX_TOOL_REGISTRY::RUNTIME_APPLICATION::PCB_EDITOR
                     ? _( "PCB Editor" )
                     : _( "Schematic Editor" );
-    appendTranscript( wxString::Format(
+    appendActivity( wxString::Format(
             _( "[dependency requested: %s — %s]\n" ), application,
             request->dependency.document.GetFullName() ) );
     setStatus( wxString::Format( _( "Opening %s for %s..." ), application,
@@ -1678,7 +1695,7 @@ void CODEX_PANEL::onRuntimeDependencyRequested( wxThreadEvent& aEvent )
 
     if( success )
     {
-        appendTranscript( wxString::Format(
+        appendActivity( wxString::Format(
                 _( "[dependency opened: %s — %s]\n" ), application,
                 detail.IsEmpty() ? request->dependency.document.GetFullName() : detail ) );
         setStatus( _( "Application opened; waiting for its KiCad service..." ) );
@@ -1688,7 +1705,7 @@ void CODEX_PANEL::onRuntimeDependencyRequested( wxThreadEvent& aEvent )
         if( detail.IsEmpty() )
             detail = _( "application could not open the requested document" );
 
-        appendTranscript( wxString::Format(
+        appendActivity( wxString::Format(
                 _( "[dependency launch failed: %s — %s]\n" ), application, detail ) );
         setStatus( wxString::Format( _( "Could not open required %s." ), application ) );
     }
@@ -1746,7 +1763,7 @@ void CODEX_PANEL::onToolCompleted( wxThreadEvent& aEvent )
 
         if( result.value( "success", false ) )
         {
-            appendTranscript( _( "[tool result: success]\n" ) );
+            appendActivity( _( "[tool result: success]\n" ) );
             setStatus( _( "Tool result delivered; Codex is continuing..." ) );
         }
         else
@@ -1760,14 +1777,14 @@ void CODEX_PANEL::onToolCompleted( wxThreadEvent& aEvent )
             if( nativeToolFailureSummary( result, code, message, details, recovery,
                                           stateChanged ) )
             {
-                appendTranscript( wxString::Format( _( "[tool result: failed — %s: %s]\n" ),
-                                                    code, message ) );
+                appendActivity( wxString::Format( _( "[tool result: failed — %s: %s]\n" ),
+                                                  code, message ) );
 
                 if( !details.IsEmpty() )
-                    appendTranscript( wxString::Format( _( "[details: %s]\n" ), details ) );
+                    appendActivity( wxString::Format( _( "[details: %s]\n" ), details ) );
 
                 if( !recovery.IsEmpty() )
-                    appendTranscript( wxString::Format( _( "[recovery: %s]\n" ), recovery ) );
+                    appendActivity( wxString::Format( _( "[recovery: %s]\n" ), recovery ) );
 
                 if( stateChanged != wxS( "none" ) )
                 {

@@ -103,6 +103,7 @@ public:
 
 private:
     void appendTranscript( const wxString& aText );
+    void appendActivity( const wxString& aText );
     void appendDialogLog( const wxString& aRole, const std::string& aText );
     bool submitUserMessage( const wxString& aMessage );
     void setBusy( bool aBusy );
@@ -140,6 +141,7 @@ private:
     wxChoice*                 m_modelChoice;
     wxChoice*                 m_reasoningChoice;
     wxTextCtrl*               m_transcript;
+    wxTextCtrl*               m_activity;
     wxTextCtrl*               m_input;
     wxButton*                 m_sendButton;
     wxButton*                 m_stopButton;
