@@ -492,6 +492,29 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleSourcingVerify(
                       { { "available", available }, { "supplier", record["supplier"] } } );
         }
 
+        // Stocking policy: every fitted part must be stocked at DigiKey, Mouser, or Newark;
+        // any other distributor requires an explicit user-approved exception.
+        std::string supplierKey = record["supplier"].get<std::string>();
+        supplierKey.erase( std::remove_if( supplierKey.begin(), supplierKey.end(),
+                                           []( unsigned char c )
+                                           {
+                                               return !std::isalnum( c );
+                                           } ),
+                           supplierKey.end() );
+        std::transform( supplierKey.begin(), supplierKey.end(), supplierKey.begin(),
+                        []( unsigned char c )
+                        {
+                            return std::tolower( c );
+                        } );
+
+        if( supplierKey != "digikey" && supplierKey != "mouser" && supplierKey != "newark" )
+        {
+            addIssue( reference, "unapproved_distributor", "error",
+                      "Sourcing evidence must come from DigiKey, Mouser, or Newark unless the "
+                      "user explicitly approves an exception",
+                      { { "supplier", record["supplier"] } } );
+        }
+
         const std::string verifiedOn = record["verified_on"].get<std::string>();
         const int year = std::stoi( verifiedOn.substr( 0, 4 ) );
         const int month = std::stoi( verifiedOn.substr( 5, 2 ) );
