@@ -2663,8 +2663,12 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
                             transformPoint( directionX, directionY, rotation, mirror );
                     const int outwardX = -static_cast<int>( transformedDirectionX );
                     const int outwardY = -static_cast<int>( transformedDirectionY );
+                    // Pin geometry is in symbol-library coordinates (y up) but the sheet
+                    // renders y down, so the vertical outward direction is inverted on
+                    // screen: a label extending "up" needs rotation 90 when outwardY is
+                    // negative in library space.
                     const int labelRotation = outwardX > 0 ? 0 : outwardX < 0 ? 180
-                                                       : outwardY > 0 ? 90 : 270;
+                                                       : outwardY > 0 ? 270 : 90;
                     const std::string endpoint = reference + "/" + unitKey + "/"
                                                  + pin["number"].get<std::string>();
                     endpointPositions[endpoint].push_back(
@@ -3025,7 +3029,8 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
 
                     if( point.labelRotation == 90 || point.labelRotation == 270 )
                     {
-                        const int64_t direction = point.labelRotation == 90 ? 1 : -1;
+                        // Rotation 90 points outward-up, which is -y in sheet coordinates.
+                        const int64_t direction = point.labelRotation == 90 ? -1 : 1;
                         attachY = std::clamp( point.y + direction * STUB_LENGTH_NM,
                                               int64_t( 0 ), int64_t( 2'000'000'000 ) );
                         appendSegment( point.x, point.y, point.x, attachY );
@@ -3076,8 +3081,8 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
                     else
                     {
                         const bool follows = trunk == point.y
-                                             || ( point.labelRotation == 90 && trunk > point.y )
-                                             || ( point.labelRotation == 270 && trunk < point.y );
+                                             || ( point.labelRotation == 90 && trunk < point.y )
+                                             || ( point.labelRotation == 270 && trunk > point.y );
 
                         if( follows )
                         {
@@ -3085,7 +3090,7 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
                         }
                         else
                         {
-                            const int64_t direction = point.labelRotation == 90 ? 1 : -1;
+                            const int64_t direction = point.labelRotation == 90 ? -1 : 1;
                             const int64_t stubY = std::clamp(
                                     point.y + direction * STUB_LENGTH_NM,
                                     int64_t( 0 ), int64_t( 2'000'000'000 ) );
