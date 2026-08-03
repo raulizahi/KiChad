@@ -142,11 +142,10 @@ std::string stableUuid( const std::string& aProject, const std::string& aKind,
 }
 
 
-std::string effects( const std::string& aJustify )
+std::string effects( const std::string& aJustify, const char* aSizeMm = "1.27" )
 {
-    std::string result =
-            "    (effects\n"
-            "      (font (size 1.27 1.27))";
+    std::string result = std::string( "    (effects\n      (font (size " ) + aSizeMm + " "
+                         + aSizeMm + "))";
 
     if( !aJustify.empty() )
         result += "\n      (justify " + aJustify + ")";
@@ -332,7 +331,9 @@ JSON defaultComponentFieldLayout( const std::string& aName, int64_t aX, int64_t 
              { "visible", !aHidden },
              { "showName", false },
              { "autoplace", true },
-             { "size", { { "xNm", 1'270'000 }, { "yNm", 1'270'000 } } },
+             // Reduced from KiCad's 1.27mm default: generated dense sheets otherwise drown
+             // in reference/value text. Authored KDS field sizes still override this.
+             { "size", { { "xNm", 1'000'000 }, { "yNm", 1'000'000 } } },
              { "font", "stroke" },
              { "lineSpacing", 1.0 },
              { "thicknessNm", 0 },
@@ -614,7 +615,8 @@ std::string globalLabelExpression( const std::string& aName, int64_t aX, int64_t
            << "    (at " << millimetres( aX ) << ' ' << millimetres( aY ) << ' '
            << aRotation << ")\n"
            << "    (fields_autoplaced yes)\n"
-           << effects( justification )
+           // Generated sheets are dense; standard 1.27mm boxed labels overwhelm them.
+           << effects( justification, "1.0" )
            << "    (uuid " << quoted( aUuid ) << ")\n"
            << "  )";
     return output.str();
