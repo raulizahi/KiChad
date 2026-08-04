@@ -2109,6 +2109,60 @@ JSON buildFabricationPlan( const JSON& aIr, const std::string& aFileStem )
                     "local connections whose generated wires stay clear of symbols." } } );
     }
 
+    // Every fitted physical component must carry a datasheet conformance record: the agent
+    // verifies pinout and application-circuit support against the exact part's datasheet
+    // and records it; production fabrication is blocked without that evidence.
+    std::map<std::string, const JSON*> conformanceRecords;
+
+    if( aIr.contains( "conformance" ) && aIr["conformance"].is_array() )
+    {
+        for( const JSON& record : aIr["conformance"] )
+            conformanceRecords[record.value( "component", "" )] = &record;
+    }
+
+    for( const JSON& component : aIr.at( "schematic" ).at( "components" ) )
+    {
+        const std::string reference = component.value( "reference", "" );
+
+        if( reference.empty() || component.value( "dnp", false )
+            || !component.contains( "footprint" ) || component["footprint"].is_null() )
+        {
+            continue;
+        }
+
+        const auto record = conformanceRecords.find( reference );
+
+        if( record == conformanceRecords.end() )
+        {
+            issues.push_back(
+                    { { "type", "missing_datasheet_conformance" },
+                      { "severity", "error" },
+                      { "description",
+                        "Fitted component " + reference
+                                + " has no datasheet conformance record; verify its pinout "
+                                  "and application circuit against the exact part's datasheet "
+                                  "and record a (conformance ...) statement" },
+                      { "component", reference } } );
+        }
+        else
+        {
+            for( const JSON& deviation :
+                 record->second->value( "deviations", JSON::array() ) )
+            {
+                if( !deviation.is_string() )
+                    continue;
+
+                issues.push_back(
+                        { { "type", "datasheet_conformance_deviation" },
+                          { "severity", "warning" },
+                          { "description",
+                            "Component " + reference + " deviates from its datasheet: "
+                                    + deviation.get<std::string>() },
+                          { "component", reference } } );
+            }
+        }
+    }
+
     KICHAD::DESIGN_SCRIPT_LAYOUT_ANALYZER::RESULT layout =
             KICHAD::DESIGN_SCRIPT_LAYOUT_ANALYZER::Analyze( aIr );
 

@@ -5238,6 +5238,106 @@ JSON compileSchematicGroup( const DOCUMENT& aDocument, size_t aNode,
 }
 
 
+JSON compileConformance( const DOCUMENT& aDocument, size_t aNode,
+                         KICHAD::DESIGN_SCRIPT_COMPILER::RESULT& aResult,
+                         std::vector<std::string>& aReferencedComponents )
+{
+    const DOCUMENT::NODE& node = aDocument.Nodes()[aNode];
+    std::string           reference;
+
+    if( node.children.size() < 2 || !scalarText( aDocument, node.children[1], reference )
+        || !validIdentifier( reference ) )
+    {
+        diagnostic( aResult, "error", "invalid_conformance",
+                    "conformance requires a bounded component reference" );
+        return JSON::object();
+    }
+
+    aReferencedComponents.push_back( reference );
+    JSON record = { { "component", reference }, { "deviations", JSON::array() } };
+
+    for( size_t index = 2; index < node.children.size(); ++index )
+    {
+        const size_t          child = node.children[index];
+        const std::string     head = aDocument.ListHead( child );
+        const DOCUMENT::NODE& childNode = aDocument.Nodes()[child];
+        std::string           value;
+
+        if( childNode.children.size() != 2
+            || !scalarText( aDocument, childNode.children[1], value ) || value.empty()
+            || value.size() > 4096 )
+        {
+            diagnostic( aResult, "error", "invalid_conformance",
+                        "conformance " + reference + " field '" + head + "' is malformed" );
+            continue;
+        }
+
+        if( head == "datasheet" )
+        {
+            if( !value.starts_with( "https://" ) || value.size() <= 8 )
+            {
+                diagnostic( aResult, "error", "invalid_conformance",
+                            "conformance " + reference + " datasheet must be an https URL" );
+                continue;
+            }
+
+            record["datasheet"] = value;
+        }
+        else if( head == "verified_on" )
+        {
+            if( value.size() != 10 || value[4] != '-' || value[7] != '-' )
+            {
+                diagnostic( aResult, "error", "invalid_conformance",
+                            "conformance " + reference
+                                    + " verified_on must be an ISO YYYY-MM-DD date" );
+                continue;
+            }
+
+            record["verified_on"] = value;
+        }
+        else if( head == "pins" || head == "application" )
+        {
+            if( value != "verified" )
+            {
+                diagnostic( aResult, "error", "invalid_conformance",
+                            "conformance " + reference + " " + head
+                                    + " must be the literal 'verified'" );
+                continue;
+            }
+
+            record[head] = true;
+        }
+        else if( head == "deviation" )
+        {
+            record["deviations"].push_back( value );
+        }
+        else
+        {
+            diagnostic( aResult, "error", "invalid_conformance",
+                        "conformance " + reference + " has unknown field '" + head + "'" );
+        }
+    }
+
+    for( const char* required : { "datasheet", "verified_on" } )
+    {
+        if( !record.contains( required ) )
+        {
+            diagnostic( aResult, "error", "invalid_conformance",
+                        "conformance " + reference + " is missing " + required );
+        }
+    }
+
+    if( !record.value( "pins", false ) || !record.value( "application", false ) )
+    {
+        diagnostic( aResult, "error", "invalid_conformance",
+                    "conformance " + reference
+                            + " must declare (pins verified) and (application verified)" );
+    }
+
+    return record;
+}
+
+
 JSON compileSource( const DOCUMENT& aDocument, size_t aNode,
                     KICHAD::DESIGN_SCRIPT_COMPILER::RESULT& aResult,
                     std::vector<std::string>& aReferencedComponents )
@@ -7311,6 +7411,9 @@ DESIGN_SCRIPT_COMPILER::JSON DESIGN_SCRIPT_COMPILER::Describe()
                       "(sku PART) (product_url HTTPS_URL) (available N) "
                       "(verified_on YYYY-MM-DD) (quantity N) [(unit_price TEXT) (notes TEXT)])" } },
                   { { "form",
+                      "(conformance REF (datasheet HTTPS_URL) (verified_on YYYY-MM-DD) "
+                      "(pins verified) (application verified) [(deviation TEXT) ...])" } },
+                  { { "form",
                       "(electrical "
                       "(rail ID (net NET) (voltage MIN NOMINAL MAX) "
                       "(source_current CURRENT) (reserve PERCENT) "
@@ -7513,6 +7616,7 @@ DESIGN_SCRIPT_COMPILER::RESULT DESIGN_SCRIPT_COMPILER::Compile( const std::strin
         { "customRules", nullptr },
         { "electrical", nullptr },
         { "sourcing", JSON::array() },
+        { "conformance", JSON::array() },
         { "production", nullptr },
         { "checks", JSON::array() },
         { "outputs", JSON::array() }
@@ -7535,6 +7639,7 @@ DESIGN_SCRIPT_COMPILER::RESULT DESIGN_SCRIPT_COMPILER::Compile( const std::strin
     bool                     sawElectrical = false;
     bool                     sawProduction = false;
     std::set<std::string>    sourceIds;
+    std::set<std::string>    conformanceIds;
     std::set<std::string>    checkKinds;
     std::set<std::string>    outputKinds;
     std::set<std::string>    connectedPins;
@@ -7951,6 +8056,20 @@ DESIGN_SCRIPT_COMPILER::RESULT DESIGN_SCRIPT_COMPILER::Compile( const std::strin
             }
 
             result.ir["sourcing"].emplace_back( std::move( source ) );
+        }
+        else if( form == "conformance" )
+        {
+            JSON conformance =
+                    compileConformance( *document, formNode, result, referencedComponents );
+            const std::string reference = conformance.value( "component", "" );
+
+            if( !reference.empty() && !conformanceIds.emplace( reference ).second )
+            {
+                diagnostic( result, "error", "duplicate_conformance",
+                            "conformance for " + reference + " occurs more than once" );
+            }
+
+            result.ir["conformance"].emplace_back( std::move( conformance ) );
         }
         else if( form == "production" )
         {
