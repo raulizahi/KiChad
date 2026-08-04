@@ -1432,6 +1432,9 @@ void KICAD_MANAGER_FRAME::CommonSettingsChanged( int aFlags )
 
 void KICAD_MANAGER_FRAME::ProjectChanged()
 {
+    if( m_codexPanel )
+        m_codexPanel->OnProjectChanged();
+
     wxString file = GetProjectFileName();
 
     // empty file string means no project loaded

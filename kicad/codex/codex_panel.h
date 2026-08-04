@@ -101,6 +101,9 @@ public:
     /// Re-read the external-layout preferences (mode + tool path) from KICAD_SETTINGS.
     void RefreshExternalLayoutSettings();
 
+    /// Rebind the panel to the newly active project, clearing both transcript panes.
+    void OnProjectChanged() { selectProjectThread(); }
+
 private:
     void appendTranscript( const wxString& aText );
     void appendActivity( const wxString& aText );
