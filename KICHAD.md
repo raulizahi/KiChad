@@ -129,6 +129,14 @@ wires), schematic parity DRC always compares against the on-disk schematic rathe
 editor's in-memory document, and every Codex exchange is appended to `codex_dialog.txt` in the
 project directory.
 
+Generated schematics carry an enforced readability contract in addition to the agent-policy
+guidance (1.27mm placement grid, 10.16mm of clear sheet between symbol bodies, right-side-up
+field text): the schematic planner rejects any plan in which two symbol anchors on the same
+sheet sit closer than 7.62mm, emitting a `crowded_schematic_placement` diagnostic that names
+both components and their distance.  One-pin symbols (power flags, test points) are exempt
+because they legitimately sit on a neighboring symbol's pin.  A rejected plan is never
+rendered; the agent must re-space and resubmit.
+
 ## Syncing upstream
 
 ```sh

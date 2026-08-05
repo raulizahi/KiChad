@@ -22,7 +22,9 @@
 #include <functional>
 #include <iomanip>
 #include <map>
+#include <optional>
 #include <set>
+#include <tuple>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -2680,6 +2682,71 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
     catch( const JSON::exception& error )
     {
         diagnostic( result, "invalid_schematic_ir", error.what() );
+    }
+
+    // Anchors closer than this floor guarantee overlapping bodies or colliding field
+    // text regardless of symbol size, so reject the plan and make the agent re-place
+    // rather than render an unreadable sheet.  One-pin symbols (power flags, test
+    // points) are exempt: they legitimately sit at a neighboring symbol's pin.
+    constexpr int64_t MINIMUM_ANCHOR_SPACING_NM = 7'620'000;
+
+    for( const auto& [crowdSheetId, crowdPlacements] : placementsBySheet )
+    {
+        const auto multiPinAnchor = [&]( const JSON& aPlacement )
+                -> std::optional<std::tuple<std::string, int64_t, int64_t>>
+        {
+            const JSON& unit = aPlacement.at( "unit" );
+            const std::string unitKey = std::to_string( unit.at( "number" ).get<int>() );
+
+            if( aPlacement.at( "resolved" ).at( "units" ).at( unitKey ).size() < 2 )
+                return std::nullopt;
+
+            return std::tuple{ aPlacement.at( "component" ).at( "reference" )
+                                               .get<std::string>() + " unit " + unitKey,
+                               unit.at( "position" ).at( "xNm" ).get<int64_t>(),
+                               unit.at( "position" ).at( "yNm" ).get<int64_t>() };
+        };
+
+        for( size_t first = 0; first < crowdPlacements.size(); ++first )
+        {
+            const auto firstAnchor = multiPinAnchor( crowdPlacements[first] );
+
+            if( !firstAnchor )
+                continue;
+
+            for( size_t second = first + 1; second < crowdPlacements.size(); ++second )
+            {
+                const auto secondAnchor = multiPinAnchor( crowdPlacements[second] );
+
+                if( !secondAnchor )
+                    continue;
+
+                const int64_t deltaX = std::get<1>( *firstAnchor )
+                                       - std::get<1>( *secondAnchor );
+                const int64_t deltaY = std::get<2>( *firstAnchor )
+                                       - std::get<2>( *secondAnchor );
+
+                if( deltaX * deltaX + deltaY * deltaY
+                    >= MINIMUM_ANCHOR_SPACING_NM * MINIMUM_ANCHOR_SPACING_NM )
+                {
+                    continue;
+                }
+
+                const int64_t distance = std::llround( std::sqrt(
+                        static_cast<double>( deltaX ) * static_cast<double>( deltaX )
+                        + static_cast<double>( deltaY )
+                                  * static_cast<double>( deltaY ) ) );
+                diagnostic( result, "crowded_schematic_placement",
+                            "components " + std::get<0>( *firstAnchor ) + " and "
+                                    + std::get<0>( *secondAnchor ) + " on sheet "
+                                    + crowdSheetId + " are only "
+                                    + millimetres( distance )
+                                    + "mm apart; keep symbol anchors at least "
+                                    + millimetres( MINIMUM_ANCHOR_SPACING_NM )
+                                    + "mm apart and leave 10.16mm of clear sheet "
+                                      "between symbol bodies" );
+            }
+        }
     }
 
     std::map<std::string, std::vector<JSON>> connectivityBySheet;

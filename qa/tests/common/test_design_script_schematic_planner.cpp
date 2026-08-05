@@ -638,6 +638,63 @@ BOOST_AUTO_TEST_CASE( GeneratesOneStableReviewableWireDirectlyBetweenResolvedNet
 }
 
 
+BOOST_AUTO_TEST_CASE( RejectsSymbolAnchorsPlacedCloserThanTheReadabilityFloor )
+{
+    const std::string program = R"KDS((kichad_design
+  (version 1)
+  (project crowded)
+  (library symbol Local (table project) (uri "${KIPRJMOD}/Local.kicad_sym"))
+  (library footprint LocalFp (table project) (uri "${KIPRJMOD}/Local.pretty"))
+  (sheet root (parent none) (file "crowded.kicad_sch") (title "Crowded"))
+  (component R1 (symbol "Local:R") (value "10k") (footprint "LocalFp:R")
+    (unit 1 (sheet root) (at 40mm 40mm) (rotation 0deg) (mirror none)))
+  (component R2 (symbol "Local:R") (value "10k") (footprint "LocalFp:R")
+    (unit 1 (sheet root) (at 40mm 45mm) (rotation 0deg) (mirror none)))
+  (net SIGNAL (pin R1 1 2) (pin R2 1 1))
+))KDS";
+    const KICHAD::DESIGN_SCRIPT_COMPILER::RESULT compiled =
+            KICHAD::DESIGN_SCRIPT_COMPILER::Compile( program );
+    BOOST_REQUIRE_MESSAGE( compiled.ok, compiled.diagnostics.dump() );
+    const std::string cache = R"SYM((symbol "Local:R"
+  (property "Reference" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+  (property "Value" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+  (symbol "R_1_1"
+    (pin passive line (at -2.54 0 0) (length 1.27)
+      (name "" (effects (font (size 1.27 1.27))))
+      (number "1" (effects (font (size 1.27 1.27)))))
+    (pin passive line (at 2.54 0 180) (length 1.27)
+      (name "" (effects (font (size 1.27 1.27))))
+      (number "2" (effects (font (size 1.27 1.27)))))))
+)SYM";
+    const nlohmann::json resolved = {
+        { "Local:R",
+          { { "libraryId", "Local:R" }, { "cacheSource", cache },
+            { "flags",
+              { { "excludeFromSim", false }, { "inBom", true }, { "onBoard", true },
+                { "inPosFiles", true } } },
+            { "properties", nlohmann::json::object() },
+            { "propertyLayouts", nlohmann::json::object() },
+            { "units",
+              { { "1", nlohmann::json::array(
+                               { { { "number", "1" }, { "xNm", -2'540'000 },
+                                   { "yNm", 0 }, { "rotationDegrees", 0 } },
+                                 { { "number", "2" }, { "xNm", 2'540'000 },
+                                   { "yNm", 0 }, { "rotationDegrees", 180 } } } ) } } } } }
+    };
+    const KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::RESULT plan =
+            KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan(
+                    compiled.ir, nlohmann::json::object(), resolved );
+    BOOST_CHECK( !plan.fullyLowered );
+    BOOST_REQUIRE( !plan.diagnostics.empty() );
+    BOOST_CHECK_EQUAL( plan.diagnostics.front().value( "code", "" ),
+                       "crowded_schematic_placement" );
+    BOOST_CHECK_NE( plan.diagnostics.front().value( "message", "" ).find( "R1" ),
+                    std::string::npos );
+    BOOST_CHECK_NE( plan.diagnostics.front().value( "message", "" ).find( "7.62" ),
+                    std::string::npos );
+}
+
+
 BOOST_AUTO_TEST_CASE( LowersEveryNativeSchematicGraphicGeometryWithStableIdentity )
 {
     const std::string program = R"KDS((kichad_design
