@@ -45,7 +45,6 @@ BEGIN_EVENT_TABLE( WX_INFOBAR, wxInfoBarGeneric )
     EVT_COMMAND( wxID_ANY, KIEVT_SHOW_INFOBAR,    WX_INFOBAR::onShowInfoBar )
     EVT_COMMAND( wxID_ANY, KIEVT_DISMISS_INFOBAR, WX_INFOBAR::onDismissInfoBar )
 
-    EVT_SYS_COLOUR_CHANGED( WX_INFOBAR::onThemeChange )
     EVT_BUTTON( ID_CLOSE_INFOBAR, WX_INFOBAR::onCloseButton )
     EVT_TIMER(  ID_CLOSE_INFOBAR, WX_INFOBAR::onTimer )
 END_EVENT_TABLE()
@@ -100,6 +99,13 @@ WX_INFOBAR::WX_INFOBAR( wxWindow* aParent, wxAuiManager* aMgr, wxWindowID aWinid
     // The default close button doesn't work with the AUI manager update scheme, so this
     // ensures any close button displayed is ours.
     RemoveAllButtons();
+
+    // Handle sys-colour changes with a dynamic binding rather than the static event table:
+    // wxInfoBarGeneric (wx >= 3.3) binds its own wxEVT_SYS_COLOUR_CHANGED handler dynamically
+    // in Create(), and dynamic handlers run before static tables.  Its UpdateColours()
+    // dereferences the default close button we just deleted above, so our handler must run
+    // first (and not Skip()) to keep the base handler away from the dangling pointer.
+    Bind( wxEVT_SYS_COLOUR_CHANGED, &WX_INFOBAR::onThemeChange, this );
 
     Layout();
 
