@@ -132,6 +132,7 @@ set( QA_COMMON_SRCS
     ${CMAKE_SOURCE_DIR}/kicad/codex/codex_tool_design.cpp
     ${CMAKE_SOURCE_DIR}/kicad/codex/codex_tool_fabricate.cpp
     ${CMAKE_SOURCE_DIR}/kicad/codex/codex_tool_inspect.cpp
+    ${CMAKE_SOURCE_DIR}/kicad/codex/codex_tool_layout.cpp
     ${CMAKE_SOURCE_DIR}/kicad/codex/codex_tool_pcb.cpp
     ${CMAKE_SOURCE_DIR}/kicad/codex/codex_tool_project.cpp
     ${CMAKE_SOURCE_DIR}/kicad/codex/codex_tool_verify.cpp
