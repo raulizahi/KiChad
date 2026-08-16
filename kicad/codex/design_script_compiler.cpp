@@ -1538,7 +1538,7 @@ JSON compileNet( const DOCUMENT& aDocument, size_t aNode,
     }
 
     JSON net = { { "name", name },
-                 { "presentation", "labels" },
+                 { "presentation", "auto" },
                  { "presentationExplicit", false },
                  { "pins", JSON::array() } };
     bool sawPresentation = false;
@@ -1553,11 +1553,13 @@ JSON compileNet( const DOCUMENT& aDocument, size_t aNode,
             std::string presentation;
 
             if( sawPresentation || !parseSingleValueForm( aDocument, child, presentation )
-                || ( presentation != "wired" && presentation != "labels" ) )
+                || ( presentation != "auto" && presentation != "wired"
+                     && presentation != "labels" && presentation != "hierarchical" ) )
             {
                 diagnostic( aResult, "error", "invalid_net_presentation",
                             "net " + name
-                                    + " presentation may occur once and must be wired or labels" );
+                                    + " presentation may occur once and must be auto, wired, "
+                                      "labels, or hierarchical" );
             }
             else
             {
@@ -1584,7 +1586,8 @@ JSON compileNet( const DOCUMENT& aDocument, size_t aNode,
         {
             diagnostic( aResult, "error", "invalid_net_field",
                         "net " + name
-                                + " accepts one (presentation wired|labels) field and endpoints "
+                                + " accepts one (presentation auto|wired|labels|hierarchical) "
+                                  "field and endpoints "
                                   "using (pin COMPONENT UNIT PIN_NUMBER)" );
             diagnostic( aResult, "error", "invalid_pin",
                         "net " + name
@@ -7177,7 +7180,8 @@ DESIGN_SCRIPT_COMPILER::JSON DESIGN_SCRIPT_COMPILER::Describe()
                       "(member pad|graphic|text|text_box|property|zone|group ID)...); "
                       "(variant ID (dnp BOOL) (exclude_from_bom BOOL) "
                       "(exclude_from_position BOOL) [(field NAME VALUE)...]); "
-                      "(model ${KIPRJMOD}/PATH.step|.stp|.wrl [(visible BOOL)] "
+                      "(model ${KIPRJMOD}/PATH|${KICAD10_3DMODEL_DIR}/PATH.step|.stp|.wrl "
+                      "[(visible BOOL)] "
                       "[(opacity DECIMAL)] [(offset X Y Z)] [(scale X Y Z)] "
                       "[(rotation X Y Z)]) ...)" } },
                   { { "form",
@@ -7196,7 +7200,7 @@ DESIGN_SCRIPT_COMPILER::JSON DESIGN_SCRIPT_COMPILER::Describe()
                       "(bold BOOL) (italic BOOL) (hyperlink none|TEXT) "
                       "(private BOOL)) ...)) ...)" } },
                   { { "form",
-                      "(net NAME (presentation wired|labels) "
+                      "(net NAME [(presentation auto|wired|labels|hierarchical)] "
                       "(pin REF UNIT NUMBER) (pin REF UNIT NUMBER) ...)" } },
                   { { "form", "(no_connect REF UNIT NUMBER)" } },
                   { { "form",
@@ -7503,10 +7507,10 @@ DESIGN_SCRIPT_COMPILER::JSON DESIGN_SCRIPT_COMPILER::Describe()
           "  (sheet root (parent none) (file \"sensor.kicad_sch\") (title \"Main\"))\n"
           "  (component R1 (symbol \"Device:R\") (value \"10k\")\n"
           "    (footprint \"Resistor_SMD:R_0603_1608Metric\")\n"
-          "    (unit 1 (sheet root) (at 40mm 40mm) (rotation 0deg) (mirror none)))\n"
+          "    (unit 1 (sheet root) (at 40.64mm 40.64mm) (rotation 0deg) (mirror none)))\n"
           "  (component LED1 (symbol \"Device:LED\") (value \"GREEN\")\n"
           "    (footprint \"LED_SMD:LED_0603_1608Metric\")\n"
-          "    (unit 1 (sheet root) (at 50mm 40mm) (rotation 0deg) (mirror none)))\n"
+          "    (unit 1 (sheet root) (at 50.8mm 40.64mm) (rotation 0deg) (mirror none)))\n"
           "  (net LED_A (pin R1 1 1) (pin LED1 1 1))\n"
           "  (check erc)\n"
           "  (check drc)\n"
@@ -8469,6 +8473,61 @@ DESIGN_SCRIPT_COMPILER::RESULT DESIGN_SCRIPT_COMPILER::Compile( const std::strin
             for( const JSON& pin : net["pins"] )
                 validateEndpointUnit( pin );
         }
+    }
+
+    size_t                   crossSheetLabelNets = 0;
+    std::vector<std::string> crossSheetLabelExamples;
+    std::set<std::string>    crossSheetLabelSheets;
+
+    for( const JSON& net : result.ir["schematic"]["nets"] )
+    {
+        if( !net.is_object() || net.value( "presentation", "auto" ) != "labels"
+            || !net.contains( "pins" ) || !net["pins"].is_array() )
+        {
+            continue;
+        }
+
+        std::set<std::string> endpointSheets;
+
+        for( const JSON& pin : net["pins"] )
+        {
+            if( !pin.is_object() || !pin.contains( "component" )
+                || !pin["component"].is_string() || !pin.contains( "unit" )
+                || !pin["unit"].is_number_integer() )
+            {
+                continue;
+            }
+
+            const std::string endpoint = pin["component"].get<std::string>() + "/"
+                                         + std::to_string( pin["unit"].get<int64_t>() );
+            auto placement = componentUnitSheets.find( endpoint );
+
+            if( placement != componentUnitSheets.end() )
+                endpointSheets.emplace( placement->second );
+        }
+
+        if( endpointSheets.size() < 2 )
+            continue;
+
+        ++crossSheetLabelNets;
+        crossSheetLabelSheets.insert( endpointSheets.begin(), endpointSheets.end() );
+
+        if( crossSheetLabelExamples.size() < 8 )
+            crossSheetLabelExamples.push_back( net.value( "name", "" ) );
+    }
+
+    if( crossSheetLabelNets > 0 )
+    {
+        diagnostic(
+                result, "warning", "cross_sheet_global_label_presentation",
+                std::to_string( crossSheetLabelNets )
+                        + " cross-sheet net(s) explicitly use global-label presentation; this "
+                          "hides hierarchy interfaces and leaves parent sheets visually empty. "
+                          "Use the default automatic presentation or (presentation hierarchical) "
+                          "unless global scope is intentional.",
+                { { "netCount", crossSheetLabelNets },
+                  { "sheetCount", crossSheetLabelSheets.size() },
+                  { "examples", crossSheetLabelExamples } } );
     }
 
     for( const JSON& noConnect : result.ir["schematic"]["noConnects"] )

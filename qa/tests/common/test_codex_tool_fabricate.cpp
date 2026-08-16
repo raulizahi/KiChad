@@ -12,6 +12,8 @@
 #include <qa_utils/wx_utils/unit_test_utils.h>
 
 #include <kicad/codex/codex_tool_registry.h>
+#include <kicad/codex/codex_tool_internal.h>
+#include <kicad/codex/design_script_compiler.h>
 #include <kicad/codex/kicad_ipc_client.h>
 
 #include <algorithm>
@@ -1391,6 +1393,29 @@ BOOST_AUTO_TEST_CASE( RequestsConfirmationOnlyForFinalExport )
 }
 
 
+BOOST_AUTO_TEST_CASE( TreatsAutomaticSchematicWiringAsProductionReviewable )
+{
+    std::string source = productionKds(
+            std::string( wxDateTime::Today().FormatISODate().ToUTF8() ) );
+    const std::string explicitWired = " (presentation wired)";
+    size_t at = 0;
+
+    while( ( at = source.find( explicitWired, at ) ) != std::string::npos )
+        source.erase( at, explicitWired.size() );
+
+    const KICHAD::DESIGN_SCRIPT_COMPILER::RESULT compiled =
+            KICHAD::DESIGN_SCRIPT_COMPILER::Compile( source );
+    BOOST_REQUIRE_MESSAGE( compiled.ok, compiled.diagnostics.dump() );
+    const JSON plan = KICHAD::CODEX_TOOLS::BuildFabricationPlan( compiled.ir, "design" );
+    BOOST_CHECK_MESSAGE( plan["productionReady"].get<bool>(), plan["issues"].dump() );
+    BOOST_CHECK_EQUAL( plan["schematicPresentation"]["automaticNets"].get<int>(), 2 );
+    BOOST_CHECK_EQUAL( plan["schematicPresentation"]["wiredNets"].get<int>(), 0 );
+    BOOST_CHECK_EQUAL( plan["schematicPresentation"]["hierarchicalNets"].get<int>(), 0 );
+    BOOST_CHECK_EQUAL( plan["schematicPresentation"]["labelNets"].get<int>(), 2 );
+    BOOST_CHECK_EQUAL( plan["schematicPresentation"]["implicitNets"].get<int>(), 2 );
+}
+
+
 BOOST_AUTO_TEST_CASE( PlansCompleteProductionIntentAndRejectsLegacyNativeInputs )
 {
     FABRICATION_PROJECT_FIXTURE fixture;
@@ -1913,7 +1938,11 @@ BOOST_AUTO_TEST_CASE( AppliesSavesAndFabricatesSourcedComponentWhenExplicitlyReq
     CODEX_TOOL_REGISTRY registry( [project]() { return project.GetFullPath(); },
                                   []() { return true; },
                                   [socketDirectory]() { return socketDirectory; },
-                                  []( const wxFileName&, std::string& ) { return true; } );
+                                  []( const wxFileName&, const JSON&, const JSON&,
+                                      std::string& )
+                                  {
+                                      return true;
+                                  } );
     JSON compiled = registry.Handle( "design", { { "operation", "compile" },
                                                    { "path", sourceName.ToStdString() } } );
     BOOST_REQUIRE_MESSAGE( compiled.at( "success" ).get<bool>(), compiled.dump() );

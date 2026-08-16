@@ -197,6 +197,7 @@ struct MANAGED_ITEM
     std::string logicalId;
     std::string itemType;
     std::string itemId;
+    std::string footprintSourceSha256;
     JSON        item = JSON::object();
 };
 
@@ -209,6 +210,7 @@ struct PLACEMENT
     double      rotationDegrees = 0.0;
     std::string side;
     bool        locked = false;
+    std::string footprintSourceSha256;
     JSON        instance;
     JSON        presentation = JSON::object();
 };
@@ -217,6 +219,7 @@ struct PLACEMENT
 struct LIVE_FOOTPRINT
 {
     std::string itemId;
+    std::string libraryId;
     bool        schematicLinked = false;
 };
 
@@ -439,6 +442,15 @@ bool readPlacement( const JSON& aJson, PLACEMENT& aPlacement, RESULT& aResult )
 
     const JSON fields = instance.value( "fields", JSON::object() );
 
+    if( instance.contains( "footprintSourceSha256" )
+        && ( !instance["footprintSourceSha256"].is_string()
+             || !sha256( instance["footprintSourceSha256"].get<std::string>() ) ) )
+    {
+        diagnostic( aResult, "invalid_placement",
+                    "planned component footprint source revision is invalid" );
+        return false;
+    }
+
     for( auto field = fields.begin(); field != fields.end(); ++field )
     {
         if( !boundedText( field.key(), 128 ) || !field.value().is_string()
@@ -453,6 +465,8 @@ bool readPlacement( const JSON& aJson, PLACEMENT& aPlacement, RESULT& aResult )
 
     aPlacement.instance = instance;
     aPlacement.instance["fields"] = fields;
+    aPlacement.footprintSourceSha256 =
+            instance.value( "footprintSourceSha256", std::string() );
 
     return true;
 }
@@ -506,6 +520,20 @@ bool readManagedItem( const JSON& aJson, const std::string& aProjectName,
     aItem.logicalId = aJson["logicalId"].get<std::string>();
     aItem.itemType = aJson["itemType"].get<std::string>();
     aItem.itemId = aJson["itemId"].get<std::string>();
+
+    if( aJson.contains( "footprintSourceSha256" ) )
+    {
+        if( aItem.itemType != "footprint" || !aJson["footprintSourceSha256"].is_string()
+            || !sha256( aJson["footprintSourceSha256"].get<std::string>() ) )
+        {
+            diagnostic( aResult, aCode,
+                        "managed footprint source revision contains an invalid value" );
+            return false;
+        }
+
+        aItem.footprintSourceSha256 =
+                aJson["footprintSourceSha256"].get<std::string>();
+    }
 
     if( !boundedText( aItem.logicalId, 128 ) || !managedType( aItem.itemType )
         || ( aItem.itemType == "footprint" && !componentReference( aItem.logicalId ) )
@@ -607,7 +635,8 @@ DESIGN_SCRIPT_PCB_RECONCILER::RESULT DESIGN_SCRIPT_PCB_RECONCILER::Reconcile(
     RESULT result;
     result.counts = { { "create", 0 }, { "update", 0 }, { "delete", 0 },
                       { "placement", 0 }, { "footprintCreate", 0 },
-                      { "footprintDelete", 0 }, { "footprintMetadata", 0 },
+                      { "footprintDelete", 0 }, { "footprintReplace", 0 },
+                      { "footprintMetadata", 0 },
                       { "footprintPresentation", 0 } };
     validateContext( aContext, result );
 
@@ -737,8 +766,33 @@ DESIGN_SCRIPT_PCB_RECONCILER::RESULT DESIGN_SCRIPT_PCB_RECONCILER::Reconcile(
                         continue;
                     }
 
+                    std::string libraryId;
+
+                    if( entry.contains( "libraryId" ) )
+                    {
+                        const std::string candidate =
+                                entry["libraryId"].is_string()
+                                        ? entry["libraryId"].get<std::string>()
+                                        : std::string();
+                        const size_t separator = candidate.find( ':' );
+
+                        if( !entry["libraryId"].is_string()
+                            || !boundedText( candidate, 512 )
+                            || separator == std::string::npos || separator == 0
+                            || separator + 1 == candidate.size()
+                            || candidate.find( ':', separator + 1 ) != std::string::npos )
+                        {
+                            diagnostic( result, "invalid_live_inventory",
+                                        "live footprint inventory contains an invalid library ID" );
+                            continue;
+                        }
+
+                        libraryId = entry["libraryId"].get<std::string>();
+                    }
+
                     liveFootprints[entry["reference"].get<std::string>()].push_back(
-                            { itemId, entry["schematicLinked"].get<bool>() } );
+                            { itemId, std::move( libraryId ),
+                              entry["schematicLinked"].get<bool>() } );
                 }
             }
         }
@@ -816,9 +870,11 @@ DESIGN_SCRIPT_PCB_RECONCILER::RESULT DESIGN_SCRIPT_PCB_RECONCILER::Reconcile(
     std::map<std::string, MANAGED_ITEM> desiredFootprints;
 
     const auto retainFootprintOwnership = [&]( const std::string& aComponent,
-                                                const std::string& aItemId )
+                                                const std::string& aItemId,
+                                                const std::string& aSourceSha256 )
     {
-        MANAGED_ITEM item = { aComponent, "footprint", aItemId, JSON::object() };
+        MANAGED_ITEM item = { aComponent, "footprint", aItemId, aSourceSha256,
+                              JSON::object() };
 
         if( !desiredFootprints.emplace( aItemId, item ).second
             || !desiredLogicalIds.emplace( item.itemType, item.logicalId ).second )
@@ -881,7 +937,8 @@ DESIGN_SCRIPT_PCB_RECONCILER::RESULT DESIGN_SCRIPT_PCB_RECONCILER::Reconcile(
             if( !placement.presentation.empty() )
                 ++result.counts["footprintPresentation"].get_ref<int64_t&>();
 
-            retainFootprintOwnership( component, managedId );
+            retainFootprintOwnership( component, managedId,
+                                      placement.footprintSourceSha256 );
             ++result.counts["placement"].get_ref<int64_t&>();
             ++result.counts["footprintCreate"].get_ref<int64_t&>();
             continue;
@@ -919,8 +976,59 @@ DESIGN_SCRIPT_PCB_RECONCILER::RESULT DESIGN_SCRIPT_PCB_RECONCILER::Reconcile(
             continue;
         }
 
+        if( placement.instance.is_object() )
+        {
+            const std::string desiredLibraryId =
+                    placement.instance["libraryId"].get<std::string>();
+
+            if( footprint.libraryId.empty() )
+            {
+                diagnostic( result, "unknown_live_footprint_library",
+                            "PCB footprint " + component
+                                    + " does not report its source library identity, so KDS "
+                                      "cannot safely determine whether its geometry must be replaced" );
+                continue;
+            }
+
+            const bool sourceRevisionChanged =
+                    !placement.footprintSourceSha256.empty()
+                    && ( !ownedBefore
+                         || previousOwned->second.footprintSourceSha256
+                                    != placement.footprintSourceSha256 );
+
+            if( footprint.libraryId != desiredLibraryId || sourceRevisionChanged )
+            {
+                result.actions.push_back(
+                        { { "action", "replace_footprint" },
+                          { "component", component },
+                          { "logicalId", component },
+                          { "itemType", "footprint" },
+                          { "replacedItemId", footprint.itemId },
+                          { "itemId", managedId },
+                          { "instance", placement.instance },
+                          { "position", { { "xNm", placement.xNm },
+                                            { "yNm", placement.yNm } } },
+                          { "rotationDegrees", placement.rotationDegrees },
+                          { "side", placement.side },
+                          { "locked", placement.locked },
+                          { "presentation", placement.presentation } } );
+                retainFootprintOwnership( component, managedId,
+                                          placement.footprintSourceSha256 );
+                ++result.counts["placement"].get_ref<int64_t&>();
+                ++result.counts["footprintReplace"].get_ref<int64_t&>();
+                ++result.counts["footprintCreate"].get_ref<int64_t&>();
+                ++result.counts["footprintDelete"].get_ref<int64_t&>();
+
+                if( !placement.presentation.empty() )
+                    ++result.counts["footprintPresentation"].get_ref<int64_t&>();
+
+                continue;
+            }
+        }
+
         if( ownedBefore )
-            retainFootprintOwnership( component, managedId );
+            retainFootprintOwnership( component, managedId,
+                                      placement.footprintSourceSha256 );
 
         JSON item = { { "id", { { "value", footprint.itemId } } },
                       { "position", { { "xNm", std::to_string( placement.xNm ) },
@@ -993,7 +1101,8 @@ DESIGN_SCRIPT_PCB_RECONCILER::RESULT DESIGN_SCRIPT_PCB_RECONCILER::Reconcile(
         result.actions = JSON::array();
         result.counts = { { "create", 0 }, { "update", 0 }, { "delete", 0 },
                           { "placement", 0 }, { "footprintCreate", 0 },
-                          { "footprintDelete", 0 }, { "footprintMetadata", 0 },
+                          { "footprintDelete", 0 }, { "footprintReplace", 0 },
+                          { "footprintMetadata", 0 },
                           { "footprintPresentation", 0 } };
         return result;
     }
@@ -1004,9 +1113,14 @@ DESIGN_SCRIPT_PCB_RECONCILER::RESULT DESIGN_SCRIPT_PCB_RECONCILER::Reconcile(
 
     for( const auto& [itemId, item] : nextOwned )
     {
-        managedItems.push_back( { { "logicalId", item.logicalId },
-                                  { "itemType", item.itemType },
-                                  { "itemId", itemId } } );
+        JSON stateItem = { { "logicalId", item.logicalId },
+                           { "itemType", item.itemType },
+                           { "itemId", itemId } };
+
+        if( item.itemType == "footprint" && !item.footprintSourceSha256.empty() )
+            stateItem["footprintSourceSha256"] = item.footprintSourceSha256;
+
+        managedItems.push_back( std::move( stateItem ) );
     }
 
     result.nextState = { { "format", "kichad-kds-managed-state" },

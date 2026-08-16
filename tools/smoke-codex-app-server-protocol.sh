@@ -155,6 +155,7 @@ send_message "$(jq -cn --arg cwd "$repo_root" '{
                 apps: false,
                 browser_use: false,
                 computer_use: false,
+                default_mode_request_user_input: true,
                 image_generation: false,
                 multi_agent: false,
                 plugins: false,
@@ -166,6 +167,7 @@ send_message "$(jq -cn --arg cwd "$repo_root" '{
             mcp_servers: {},
             web_search: "live",
             tools: {
+                experimental_request_user_input: { enabled: true },
                 web_search: { context_size: "high" }
             }
         },
@@ -294,6 +296,7 @@ send_message "$(jq -cn --arg cwd "$repo_root" --arg thread_id "$thread_id" '{
                 apps: false,
                 browser_use: false,
                 computer_use: false,
+                default_mode_request_user_input: true,
                 image_generation: false,
                 multi_agent: false,
                 plugins: false,
@@ -305,6 +308,7 @@ send_message "$(jq -cn --arg cwd "$repo_root" --arg thread_id "$thread_id" '{
             mcp_servers: {},
             web_search: "live",
             tools: {
+                experimental_request_user_input: { enabled: true },
                 web_search: { context_size: "high" }
             }
         }

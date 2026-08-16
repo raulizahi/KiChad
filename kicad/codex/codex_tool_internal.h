@@ -94,9 +94,19 @@ bool InventoryProjectSymbolLibraries( const wxString& aProjectPath,
 bool InventoryProjectFootprints( const wxString& aProjectPath,
                                  const nlohmann::json& aCompilerIr,
                                  nlohmann::json& aSources, std::string& aError );
+bool ValidateFootprintModelAssets( const wxString& aProjectPath,
+                                   const nlohmann::json& aCompilerIr,
+                                   nlohmann::json& aSummary, std::string& aError );
 bool SchematicScreenUuid( const std::string& aSource, std::string& aUuid,
                           std::string& aError );
 bool ValidateNativeSchematicHierarchy( const wxFileName& aRootSchematic,
+                                       std::string& aError );
+bool ValidateNativeSchematicHierarchy( const wxFileName& aRootSchematic,
+                                       const nlohmann::json& aCompilerIr,
+                                       std::string& aError );
+bool ValidateNativeSchematicHierarchy( const wxFileName& aRootSchematic,
+                                       const nlohmann::json& aCompilerIr,
+                                       const nlohmann::json& aResolvedSymbols,
                                        std::string& aError );
 bool ValidateProjectLibraryTable( const std::string& aKind, const std::string& aSource,
                                   size_t& aRows, std::string& aError );
@@ -155,7 +165,9 @@ bool ExecutePcbActions( const KICHAD_IPC_CLIENT& aClient, const KICHAD_IPC_TARGE
 bool RunNativeKiCadCheck( const std::string& aCheck, const wxFileName& aInput,
                           std::string& aReport, std::string& aError );
 bool RunNativeKiCadPreview( const std::string& aView, const wxFileName& aInput,
-                            const wxFileName& aOutput, int aPage, std::string& aError );
+                            const std::vector<int>& aPages,
+                            const std::vector<wxFileName>& aOutputs,
+                            std::string& aError );
 bool CanonicalizeExisting( wxFileName& aPath, bool aDirectory = false );
 bool CreateFabricationVerificationSnapshot(
         const wxFileName& aProjectRoot, const wxFileName& aBoard,
@@ -165,6 +177,9 @@ bool CreateFabricationVerificationSnapshot(
         PRIVATE_TEMPORARY_DIRECTORY& aSnapshot, std::string& aError );
 nlohmann::json BuildFabricationPlan( const nlohmann::json& aIr,
                                      const std::string& aFileStem );
+bool BuildNativeNetlistValidationPlan(
+        const nlohmann::json& aIr, const nlohmann::json& aResolvedSymbols,
+        const std::string& aFileStem, nlohmann::json& aPlan, std::string& aError );
 bool RunNativeKiCadFabrication( const wxFileName& aBoard,
                                 const wxFileName& aSchematic,
                                 const nlohmann::json& aPlan,

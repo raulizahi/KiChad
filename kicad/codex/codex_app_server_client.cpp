@@ -255,9 +255,10 @@ bool CODEX_APP_SERVER_CLIENT::SendNotification( const std::string& aMethod, cons
 }
 
 
-bool CODEX_APP_SERVER_CLIENT::SendResponse( const JSON& aId, const JSON& aResult )
+bool CODEX_APP_SERVER_CLIENT::SendResponse( const JSON& aId, const JSON& aResult,
+                                            bool aSensitive )
 {
-    return writeMessage( { { "id", aId }, { "result", aResult } } );
+    return writeMessage( { { "id", aId }, { "result", aResult } }, aSensitive );
 }
 
 
@@ -268,13 +269,18 @@ bool CODEX_APP_SERVER_CLIENT::SendError( const JSON& aId, int aCode, const std::
 }
 
 
-bool CODEX_APP_SERVER_CLIENT::writeMessage( const JSON& aMessage )
+bool CODEX_APP_SERVER_CLIENT::writeMessage( const JSON& aMessage, bool aSensitive )
 {
+    const JSON loggedMessage = aSensitive
+                                       ? JSON( { { "id", aMessage.value( "id", JSON() ) },
+                                                 { "result", "[REDACTED]" } } )
+                                       : aMessage;
+
     if( !IsRunning() || !m_process->GetOutputStream() )
     {
         KICHAD::CODEX_PROTOCOL_LOG::Event( "protocol_write_failed",
                                            { { "reason", "app-server input unavailable" },
-                                             { "message", aMessage } } );
+                                             { "message", loggedMessage } } );
         return false;
     }
 
@@ -301,7 +307,7 @@ bool CODEX_APP_SERVER_CLIENT::writeMessage( const JSON& aMessage )
         return false;
     }
 
-    KICHAD::CODEX_PROTOCOL_LOG::Protocol( "outbound", aMessage );
+    KICHAD::CODEX_PROTOCOL_LOG::Protocol( "outbound", loggedMessage );
     m_outboundQueuedBytes += serialized.size();
     m_outboundFrames.push_back(
             { serialized, 0, std::chrono::steady_clock::now() } );

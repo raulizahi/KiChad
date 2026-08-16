@@ -32,6 +32,7 @@
 #include <kiid.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <map>
 #include <set>
 #include <string>
@@ -60,6 +61,52 @@ constexpr size_t MAX_DESIGN_PATCH_EDITS = 128;
 constexpr size_t MAX_DESIGN_PATCH_BYTES = 16 * 1024 * 1024;
 constexpr size_t MAX_DESIGN_READ_LINES = 1000;
 constexpr size_t MAX_DESIGN_SEARCH_CONTEXT_BYTES = 4096;
+
+
+bool attachFootprintSourceDigests( JSON& aOperations, const JSON& aFootprintSources,
+                                   std::string& aError )
+{
+    if( !aOperations.is_array() || !aFootprintSources.is_object() )
+    {
+        aError = "footprint source digest input is malformed";
+        return false;
+    }
+
+    for( JSON& operation : aOperations )
+    {
+        if( !operation.is_object() || operation.value( "action", "" ) != "place_by_reference"
+            || !operation.contains( "instance" ) )
+        {
+            continue;
+        }
+
+        JSON& instance = operation["instance"];
+
+        if( !instance.is_object() || !instance.contains( "libraryId" )
+            || !instance["libraryId"].is_string() )
+        {
+            aError = "planned footprint instance has no resolved library identity";
+            return false;
+        }
+
+        const std::string libraryId = instance["libraryId"].get<std::string>();
+        auto source = aFootprintSources.find( libraryId );
+
+        if( source == aFootprintSources.end() || !source->is_string()
+            || source->get_ref<const std::string&>().empty() )
+        {
+            aError = "planned footprint " + libraryId
+                     + " has no exact resolved native source";
+            return false;
+        }
+
+        std::string digest;
+        picosha2::hash256_hex_string( source->get_ref<const std::string&>(), digest );
+        instance["footprintSourceSha256"] = std::move( digest );
+    }
+
+    return true;
+}
 
 
 struct PROJECT_LIBRARY_TABLE_UPDATE
@@ -107,6 +154,117 @@ struct MANAGED_FOOTPRINT_LIBRARY_UPDATE
     KICHAD::MANAGED_FOOTPRINT_LIBRARY_IO::FILES previousFiles;
     bool        applied = false;
 };
+
+
+bool validatePlannedNativeSchematic(
+        const JSON& aOperation, const JSON& aCompilerIr,
+        const JSON& aResolvedSymbols,
+        const CODEX_TOOL_REGISTRY::NATIVE_SCHEMATIC_VALIDATOR& aValidator,
+        std::string& aError )
+{
+    if( !aValidator )
+        return true;
+
+    if( !aOperation.is_object() || !aOperation.contains( "rootFile" )
+        || !aOperation["rootFile"].is_string() || !aOperation.contains( "files" )
+        || !aOperation["files"].is_array() )
+    {
+        aError = "planned schematic validation input is malformed";
+        return false;
+    }
+
+    KICHAD::CODEX_TOOLS::PRIVATE_TEMPORARY_DIRECTORY staging;
+
+    if( !staging.Create( "kichad-schematic-preview-", aError ) )
+        return false;
+
+    const std::string rootRelative = aOperation["rootFile"].get<std::string>();
+    std::set<std::filesystem::path> stagedPaths;
+    wxFileName rootSchematic;
+    size_t totalBytes = 0;
+
+    for( const JSON& file : aOperation["files"] )
+    {
+        if( !file.is_object() || !file.contains( "path" ) || !file["path"].is_string()
+            || !file.contains( "newDocumentSource" )
+            || !file["newDocumentSource"].is_string() )
+        {
+            aError = "planned schematic file is malformed";
+            return false;
+        }
+
+        const std::string relativeText = file["path"].get<std::string>();
+        const std::u8string relativeUtf8(
+                reinterpret_cast<const char8_t*>( relativeText.data() ),
+                reinterpret_cast<const char8_t*>( relativeText.data() + relativeText.size() ) );
+        const std::filesystem::path original( relativeUtf8 );
+        const std::filesystem::path relative = original.lexically_normal();
+
+        if( relativeText.empty() || relative.is_absolute() || relative.has_root_path()
+            || relative.extension() != ".kicad_sch" )
+        {
+            aError = "planned schematic path is not a confined relative .kicad_sch file";
+            return false;
+        }
+
+        for( const std::filesystem::path& part : original )
+        {
+            if( part == ".." )
+            {
+                aError = "planned schematic path escapes its private validation directory";
+                return false;
+            }
+        }
+
+        if( !stagedPaths.emplace( relative ).second )
+        {
+            aError = "planned schematic contains a duplicate file path";
+            return false;
+        }
+
+        const std::string& source = file["newDocumentSource"].get_ref<const std::string&>();
+
+        if( source.empty() || source.size() > MAX_DESIGN_SCRIPT_BYTES
+            || totalBytes > MAX_SCHEMATIC_INVENTORY_BYTES - source.size() )
+        {
+            aError = "planned schematic validation input exceeds its bounded size";
+            return false;
+        }
+
+        totalBytes += source.size();
+        const std::filesystem::path target = staging.Path() / relative;
+        std::error_code filesystemError;
+        std::filesystem::create_directories( target.parent_path(), filesystemError );
+
+        if( filesystemError )
+        {
+            aError = "could not create the private schematic validation hierarchy";
+            return false;
+        }
+
+        const wxString targetString = wxString::FromUTF8( target.string() );
+        wxFile output;
+
+        if( !output.Create( targetString, true )
+            || output.Write( source.data(), source.size() ) != source.size()
+            || !output.Flush() )
+        {
+            aError = "could not write the private schematic validation hierarchy";
+            return false;
+        }
+
+        if( relative.generic_string() == rootRelative )
+            rootSchematic.Assign( targetString );
+    }
+
+    if( !rootSchematic.IsOk() || !rootSchematic.FileExists() )
+    {
+        aError = "planned root schematic is missing from its file set";
+        return false;
+    }
+
+    return aValidator( rootSchematic, aCompilerIr, aResolvedSymbols, aError );
+}
 
 
 bool saveBoardDocument( const KICHAD_IPC_CLIENT& aClient,
@@ -730,6 +888,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
                 KICHAD::DESIGN_SCRIPT_FOOTPRINT_LIBRARY_GENERATOR::Generate( compiled.ir );
         JSON symbolLibrarySources;
         JSON footprintSources;
+        JSON footprintModelAssets;
 
         if( !generatedSymbols.ok )
         {
@@ -747,6 +906,12 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
                                     ? "managed footprint libraries could not be generated"
                                     : generatedFootprints.diagnostics.front().value(
                                               "message", "managed footprint generation failed" ) );
+        }
+
+        if( !KICHAD::CODEX_TOOLS::ValidateFootprintModelAssets(
+                    aProjectPath, compiled.ir, footprintModelAssets, pathError ) )
+        {
+            return failure( "footprint_model_asset_unavailable", pathError );
         }
 
         if( !KICHAD::CODEX_TOOLS::InventoryProjectSymbolLibraries( aProjectPath, compiled.ir,
@@ -785,6 +950,13 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
         {
             planned = KICHAD::DESIGN_SCRIPT_PCB_PLANNER::Plan(
                     compiled.ir, resolvedSymbols.symbols );
+
+            if( !attachFootprintSourceDigests( planned.operations, footprintSources,
+                                               pathError ) )
+            {
+                return failure( "footprint_inventory_failed", pathError );
+            }
+
             schematicPlanned = KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan(
                     compiled.ir, JSON::object(), resolvedSymbols.symbols );
         }
@@ -793,6 +965,25 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
             schematicPlanned.counts = resolvedSymbols.counts;
             schematicPlanned.diagnostics = resolvedSymbols.diagnostics;
         }
+
+        if( schematicPlanned.fullyLowered && !schematicPlanned.operations.empty() )
+        {
+            pathError.clear();
+
+            if( !validatePlannedNativeSchematic(
+                        schematicPlanned.operations[0], compiled.ir,
+                        resolvedSymbols.symbols,
+                        m_schematicValidator, pathError ) )
+            {
+                return failure(
+                        "schematic_validation_failed",
+                        pathError.empty()
+                                ? "native schematic connectivity validation failed"
+                                : pathError,
+                        { { "sourceSha256", compiled.sourceSha256 } } );
+            }
+        }
+
         JSON items = JSON::array();
 
         for( const JSON& plannedOperation : planned.operations )
@@ -912,6 +1103,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
             { "counts", generatedFootprints.counts },
             { "libraries", generatedFootprints.libraries }
         };
+        payload["footprintModelAssets"] = std::move( footprintModelAssets );
 
         if( hasPath )
             payload["path"] = aArguments["path"];
@@ -981,6 +1173,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
                 KICHAD::DESIGN_SCRIPT_FOOTPRINT_LIBRARY_GENERATOR::Generate( compiled.ir );
         JSON symbolLibrarySources;
         JSON footprintSources;
+        JSON footprintModelAssets;
 
         if( !generatedSymbols.ok )
         {
@@ -998,6 +1191,12 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
                                     ? "managed footprint libraries could not be generated"
                                     : generatedFootprints.diagnostics.front().value(
                                               "message", "managed footprint generation failed" ) );
+        }
+
+        if( !KICHAD::CODEX_TOOLS::ValidateFootprintModelAssets(
+                    aProjectPath, compiled.ir, footprintModelAssets, pathError ) )
+        {
+            return failure( "footprint_model_asset_unavailable", pathError );
         }
 
         if( !KICHAD::CODEX_TOOLS::InventoryProjectSymbolLibraries( aProjectPath, compiled.ir,
@@ -1044,6 +1243,9 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
         planned = KICHAD::DESIGN_SCRIPT_PCB_PLANNER::Plan(
                 compiled.ir, resolvedSymbols.symbols );
 
+        if( !attachFootprintSourceDigests( planned.operations, footprintSources, pathError ) )
+            return failure( "footprint_inventory_failed", pathError );
+
         KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::RESULT schematicPreplanned =
                 KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan(
                         compiled.ir, JSON::object(), resolvedSymbols.symbols );
@@ -1071,6 +1273,22 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
             }
 
             return failure( "backend_incomplete", message );
+        }
+
+        pathError.clear();
+
+        if( !schematicPreplanned.operations.empty()
+            && !validatePlannedNativeSchematic(
+                    schematicPreplanned.operations[0], compiled.ir,
+                    resolvedSymbols.symbols,
+                    m_schematicValidator, pathError ) )
+        {
+            return failure(
+                    "schematic_preflight_failed",
+                    pathError.empty()
+                            ? "native schematic connectivity validation failed"
+                            : pathError,
+                    { { "sourceSha256", compiled.sourceSha256 } } );
         }
 
         std::unique_ptr<kiapi::board::BoardStackup> desiredStackup;
@@ -2505,9 +2723,13 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
                 const bool nativeValid = pathError.empty()
                                          && ( m_schematicValidator
                                                       ? m_schematicValidator(
-                                                                validationRoot, pathError )
+                                                                validationRoot, compiled.ir,
+                                                                resolvedSymbols.symbols,
+                                                                pathError )
                                                       : KICHAD::CODEX_TOOLS::ValidateNativeSchematicHierarchy(
-                                                                validationRoot, pathError ) );
+                                                                validationRoot, compiled.ir,
+                                                                resolvedSymbols.symbols,
+                                                                pathError ) );
 
                 if( !nativeValid )
                 {
@@ -2613,6 +2835,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
                              { "managedSymbolLibrariesApplied", managedSymbolLibrariesApplied },
                              { "managedFootprintLibrariesApplied",
                                managedFootprintLibrariesApplied },
+                             { "footprintModelAssets", footprintModelAssets },
                              { "schematicFilesApplied", schematicFilesApplied },
                              { "schematicCounts", schematicReconciled.counts },
                              { "boardSaved", boardDocumentChanged },
@@ -2705,6 +2928,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
                          { "managedSymbolLibrariesApplied", managedSymbolLibrariesApplied },
                          { "managedFootprintLibrariesApplied",
                            managedFootprintLibrariesApplied },
+                         { "footprintModelAssets", footprintModelAssets },
                          { "schematicFilesApplied", schematicFilesApplied },
                          { "schematicCounts", schematicReconciled.counts },
                          { "zonesRefilled", zoneMutation ? expectedZoneIds.size() : 0 },

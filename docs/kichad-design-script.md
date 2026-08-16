@@ -633,10 +633,8 @@ the root file is exactly `PROJECT.kicad_sch`. Non-root sheets declare their pare
   (parent root)
   (file "power.kicad_sch")
   (title "Power")
-  (at 20mm 30mm)
-  (size 40mm 20mm)
-  (pin VIN input (at 20mm 35mm) (side left))
-  (pin VOUT output (at 60mm 35mm) (side right)))
+  (at 20.32mm 30.48mm)
+  (size 40.64mm 20.32mm))
 ```
 
 Pin direction is one of `input`, `output`, `bidirectional`, `tri_state`, or `passive`; side is
@@ -646,6 +644,14 @@ cycles, recursive ancestor file reuse, path traversal, absolute paths, case-only
 duplicate fields, and more than 128 sheets, 256 pins per sheet, or 4096 hierarchy pins are rejected
 before inventory or mutation. A single native screen file cannot yet be instantiated by multiple
 KDS sheet IDs, so shared-screen aliases are rejected rather than compiled incorrectly.
+
+Sheet pins are optional for ordinary KDS nets. When an automatic, wired, or hierarchical net crosses a
+sheet boundary, the planner infers the minimum required interface on every boundary between its
+endpoints. It deterministically allocates a passive native sheet pin, matching child hierarchical
+label, and readable wire paths on both parent and child pages. An explicit same-name sheet pin is
+reused when direction or placement matters. Inferred interfaces prefer 2.54 mm spacing and fall
+back to KiCad's 1.27 mm connection grid; a boundary that cannot safely hold the interface fails with
+steering to enlarge the sheet or declare buses instead of overlapping pins.
 
 The compiler derives stable UUIDv8 identities for each managed sheet symbol, sheet pin, and child
 hierarchical label. Existing screen UUIDs are never replaced: they are inventoried first and used in
@@ -758,13 +764,11 @@ defaults; malformed or duplicate flags abort before planning. This keeps virtual
 out of downstream artifacts whenever their actual library definition requires it, without adding
 KDS-only policy fields.
 
-Each placed unit, pin instance, generated wire segment, global-net endpoint, and explicit
-no-connect marker receives a stable UUIDv8 identity. Every KDS net declares its review
-presentation in the same semantic form as its connectivity:
+Each placed unit, pin instance, generated wire segment, net-name anchor, and explicit no-connect
+marker receives a stable UUIDv8 identity. A KDS net normally needs only its name and endpoints:
 
 ```scheme
 (net SENSOR_OUT
-  (presentation wired)
   (pin U1 1 1)
   (pin R4 1 1))
 
@@ -775,23 +779,45 @@ presentation in the same semantic form as its connectivity:
   (pin J1 1 2))
 ```
 
-`wired` resolves the rotation- and mirror-transformed native connection point of every named pin
-and creates a deterministic orthogonal tree on one sheet. The router honors each pin's outward
+Omitting `presentation` selects `auto`: same-sheet endpoints receive a deterministic physical
+wire tree, while cross-sheet endpoints receive the inferred native hierarchy described above.
+`hierarchical` explicitly requests that same hierarchy-aware policy. `wired` requests physical
+wiring on each involved page and uses the same native sheet-pin interfaces when endpoints cross
+sheet boundaries. `labels` is the only
+label-only connectivity mode; it deliberately emits short global-label stubs and is appropriate
+for intentional global or power connectivity.
+
+Physical routing resolves the rotation- and mirror-transformed native connection point of every named pin
+and creates a deterministic orthogonal tree on each involved page. The router honors each pin's outward
 direction, uses a single trunk for branches, adds junctions at internal branch points, and unions
 touching or overlapping collinear intervals before splitting them at every pin, branch, and name
 anchor and assigning stable segment identities. That normalization matches KiCad's own
 collinear-wire behavior without allowing a pin to disappear into the interior of a merged segment.
-Two inset global name anchors preserve the exact unqualified PCB net name, satisfy KiCad's
-single-global-label ERC rule, and leave the visible wire—not detached per-pin stubs—as the
-reviewable connection. A wired net spanning multiple sheets is rejected with steering to use
-labels or hierarchical pins.
+An inferred child hierarchical label is placed on a short clear stub beside a real circuit endpoint
+when possible; the fixed page-margin lane is only a fallback. This keeps dense multi-sheet designs
+readable without creating long wire walls between a component and its interface. The router reserves
+every present and future endpoint, its first 1.27 mm exit corridor, and every emitted segment by net.
+It moves trunks, label stubs, and detours away from foreign endpoints and rejects every crossing,
+T/corner, or collinear contact between different nets. If the simple direct or dogleg candidates are
+blocked, a bounded deterministic orthogonal grid search finds a legal multi-turn path. A genuine
+no-path diagnostic identifies the affected sheet, both coordinates, and the exact blocking pin or
+wire coordinates. A truly non-planar page falls back to visible labels at its endpoints instead of
+silently shorting nets; those labels retain the route's original naming scope, so a same-sheet global
+net cannot silently become a sheet-qualified PCB-parity mismatch.
+`isolatedLabelFallbacks` reports that decision for review.
+One global name anchor appears at a physical route endpoint on exactly one routing page. It
+preserves the exact unqualified KDS/PCB net name; it never substitutes for the visible wire or
+hierarchy interfaces. A second anchor is neither required nor emitted. Fabrication accepts automatic, wired, and
+hierarchical nets as reviewable. A design whose only connectivity uses explicit `labels` remains
+blocked from production readiness until physical wire paths are generated and every rendered page
+is reviewed. Explicit label presentation across several sheets also produces a bounded compiler
+warning because automatic hierarchy is normally clearer.
 
-`labels` deliberately lowers to global labels attached by short wire stubs at every resolved pin;
-it is appropriate for power rails, intentional global connectivity, and cross-sheet nets. Omitting
-`presentation` retains label behavior for backward-compatible compilation, but fabrication
-readiness rejects the implicit choice. A production design must explicitly classify every net and
-must contain at least one wired net when it contains electrical connectivity. This prevents an
-electrically valid but visually unreviewable label-only drawing from being called production-ready.
+All electrical placement and drawing anchors are normalized during native lowering to KiCad's
+1.27 mm schematic connection grid. Component origins, sheet rectangles and pins, wires, buses, bus
+entries, junctions, labels, and directives therefore cannot create the common visually-touching but
+electrically-disconnected off-grid failure. The plan reports how many coordinates were adjusted;
+KDS retains the authored coordinates as its sole persistent representation.
 
 Repeated physical pins with the same number receive connectivity at every resolved location. A
 missing unit or pin aborts before mutation. Native `kicad-cli sch export netlist` validation proves
@@ -1416,8 +1442,15 @@ KDS handles even though KiCad does not assign UUIDs to a custom pad's internal p
 Layer tokens are explicit: `F.Cu`, `B.Cu`, their mask/paste/adhesive
 layers, plus `all_copper` and `all_mask` for the native wildcard sets. Through-hole pads require
 `(drill round DIAMETER)` or `(drill oval WIDTH HEIGHT)` and `all_copper`; surface pads cannot carry
-a drill. NPTH pads cannot have an electrical number. Physical radius, trapezoid, layer-removal, and
-drill/type constraints are rejected by the compiler before any file mutation.
+a drill. A numberless `smd` pad may instead be a front- or back-side technical aperture containing
+only that side's paste, mask, or adhesive layers; this represents the independent stencil windows
+used by WSON/QFN exposed pads without inventing electrical copper. Aperture pads spanning both sides
+or carrying an electrical number are rejected. Electrical-only metadata (pin semantics, teardrops,
+zone/thermal/clearance policy, or copper padstacks) is also rejected on apertures, and mask/paste
+margin overrides require the corresponding technical layer. The generated numberless native pads
+are loaded by KiCad's own footprint parser before installation. NPTH pads cannot have an electrical
+number. Physical radius, trapezoid, layer-removal, and drill/type constraints are rejected by the
+compiler before any file mutation.
 
 Pads may also declare `shape_offset`, `trapezoid_delta`, a typed native `property`, `die_length`,
 pin function/type metadata, and local solder-mask, solder-paste, clearance, zone-connection, thermal
@@ -1678,9 +1711,14 @@ would change schematic-to-board identity:
   (field "Manufacturer Part Number" "MODULE-001"))
 ```
 
-Model assignments are confined to `${KIPRJMOD}` and accept STEP, STP, or WRL paths with bounded
-offset, scale, rotation, visibility, and opacity. Referencing a model does not yet acquire or embed
-its bytes, so sourcing and package-data workflows must still provide that project asset separately.
+Model assignments accept project-confined `${KIPRJMOD}` files or installed-stock
+`${KICAD10_3DMODEL_DIR}` files and require STEP, STP, or WRL paths with bounded offset, scale,
+rotation, visibility, and opacity. Preview and apply resolve the active KiCad versioned stock-model
+root, canonicalize every referenced file, reject missing/empty/oversized/symlinked or escaping
+assets, and report checked project/stock counts before launching an editor or mutating a document.
+Referencing a project model does not acquire or embed its bytes, so sourcing and package-data
+workflows must still provide that project asset separately; stock models remain portable with the
+KiCad 10 library installation.
 
 All footprints are sorted and emitted as KiCad 10 format `20260206` files with deterministic UUIDv8
 field, property, pad, graphic, text, text-box, zone, and group identities. Apply uses the generated sources directly for compiler-created board
@@ -1688,7 +1726,16 @@ instances, snapshots the exact prior whole library, atomically swaps a staging d
 and asks `kicad-cli fp upgrade --force` to parse and resave every file in an isolated directory.
 Unexpected files, subdirectories, symlinks, native rejection, or any later pre-commit failure abort
 the operation and restore the prior library, project tables, schematics, and settings in reverse
-order. Footprint authoring remains intentionally partial: embedded assets and complete
+order. Each placed footprint carries the SHA-256 of its exact resolved native source in managed
+state. A library-ID change or same-ID source revision uses the PCB editor's native atomic footprint
+exchange inside the existing commit. The exchange collision-checks any identity migration, safely
+reconciles child and pad UUIDs, preserves group/routing relationships, reapplies authoritative KDS
+instance metadata and pad nets, and verifies identity, placement, orientation, lock/DNP state,
+symbol link, metadata, pad/net inventory, and 3D-model inventory from KiCad's response before the
+commit can close. A replacement or readback rejection drops the commit; recovery from an uncertain
+journal clears only the source revision so the next apply must re-verify the footprint rather than
+trusting stale geometry.
+Footprint authoring remains intentionally partial: embedded assets and complete
 package-data-to-KLC geometry generation remain explicit capability gaps. Plugging,
 filling, capping, and covering are KiCad via—not footprint-pad—file semantics and are tracked under
 the board-via capability.
@@ -2541,17 +2588,23 @@ Keepouts use a separate deterministic ownership type and exact `rule_area_settin
 their unfilled state is never confused with a failed copper refill.
 
 Placement resolves exactly one schematic component by reference. If its footprint is already on the
-board, KDS updates position, rotation, front/back side, lock state, Value, DNP, Datasheet,
-Description, and the exact component-property field set in place. Footprint UUID, symbol path,
-pads, graphics, models, and child UUIDs remain unchanged. Metadata replacement uses the same live
-transaction and exact protobuf readback as geometry, so rollback restores the prior footprint on
-failure. If the footprint is absent, a declared project-local `.pretty` library or an installed
+board and its reported library identity matches KDS, KDS updates position, rotation, front/back
+side, lock state, Value, DNP, Datasheet, Description, and the exact component-property field set in
+place. Footprint UUID, symbol path, pads, graphics, models, and child UUIDs remain unchanged. If the
+KDS component changes to a different footprint library entry, apply replaces the complete live
+footprint from the resolved source inside the same transaction, preserving desired placement,
+presentation, symbol linkage, and pad nets; a rejected exchange drops the transaction and restores
+the original complete footprint. An
+unreported live library identity fails with explicit steering rather than pretending a metadata
+update changed geometry. If the footprint is absent, a declared project-local `.pretty` library or an installed
 KiCad stock global library may supply the exact `.kicad_mod`: KiChad parses it with KiCad's
 native parser and atomically creates a footprint instance with the component reference, value,
 DNP flag, deterministic root UUID and hierarchical symbol path, sheet metadata, placement, and pad
-nets. The sidecar records ownership of only that compiler-created instance. A later apply deletes it
-by exact UUID when the placement is removed and recreates the same UUID when restored; an existing
-user-owned footprint resolved by reference is never adopted or deleted. Project sources are
+nets. The sidecar records ownership of compiler-created and explicitly replaced instances. A later
+apply deletes such an instance by exact UUID when the placement is removed and recreates the same
+UUID when restored. A matching user-owned footprint resolved by reference remains unowned; changing
+its declared library identity is an explicit request to replace it and transfer ownership to KDS.
+Project sources are
 size-bounded, project-confined regular files; stock global sources must resolve inside KiCad's
 installed stock-library root. Path-shaped entry names and undeclared or unavailable content are
 rejected. The resolver is generic by declared library nickname and entry—there is no Arduino,

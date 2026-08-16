@@ -21,6 +21,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <string_view>
 #include <vector>
 
@@ -727,7 +728,48 @@ bool KICHAD::FABRICATION_ARTIFACT_VALIDATOR::ValidateKiCadNetlist(
 
     if( actualReferences != expectedReferences )
     {
-        aError = "KiCad netlist component references differ from compiled KDS";
+        const auto describeDifference =
+                []( const std::set<std::string>& aLeft,
+                    const std::set<std::string>& aRight )
+                {
+                    constexpr size_t MAX_REPORTED_REFERENCES = 12;
+                    std::ostringstream description;
+                    size_t count = 0;
+
+                    for( const std::string& reference : aLeft )
+                    {
+                        if( aRight.contains( reference ) )
+                            continue;
+
+                        if( count != 0 )
+                            description << ", ";
+
+                        if( count == MAX_REPORTED_REFERENCES )
+                        {
+                            description << "...";
+                            break;
+                        }
+
+                        description << reference;
+                        ++count;
+                    }
+
+                    return description.str();
+                };
+        const std::string missing =
+                describeDifference( expectedReferences, actualReferences );
+        const std::string unexpected =
+                describeDifference( actualReferences, expectedReferences );
+        aError = "KiCad netlist component references differ from compiled KDS"
+                 " (expected " + std::to_string( expectedReferences.size() )
+                 + ", native " + std::to_string( actualReferences.size() ) + ")";
+
+        if( !missing.empty() )
+            aError += "; missing from native export: " + missing;
+
+        if( !unexpected.empty() )
+            aError += "; unexpected in native export: " + unexpected;
+
         return false;
     }
 

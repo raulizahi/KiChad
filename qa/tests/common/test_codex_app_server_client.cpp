@@ -14,6 +14,8 @@
 #include <kicad/codex/codex_app_server_client.h>
 
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -50,6 +52,17 @@ private:
     bool     m_hadValue;
 };
 
+
+std::string readFileSnapshot( const wxString& aPath )
+{
+    std::ifstream input( aPath.ToStdString(), std::ios::binary );
+
+    if( !input )
+        return {};
+
+    return { std::istreambuf_iterator<char>( input ), std::istreambuf_iterator<char>() };
+}
+
 } // namespace
 
 
@@ -64,6 +77,7 @@ BOOST_AUTO_TEST_CASE( DeliversLargeJsonRpcFrameAcrossPipeBackpressure )
     const wxString script = wxFileName( root, wxS( "slow-app-server" ) ).GetFullPath();
     const wxString capture = wxFileName( root, wxS( "captured.ndjson" ) ).GetFullPath();
     const wxString codexHome = wxFileName( root, wxS( "codex-home" ) ).GetFullPath();
+    const wxString configHome = wxFileName( root, wxS( "config" ) ).GetFullPath();
     const char* scriptSource =
             "#!/usr/bin/env python3\n"
             "import os\n"
@@ -85,6 +99,7 @@ BOOST_AUTO_TEST_CASE( DeliversLargeJsonRpcFrameAcrossPipeBackpressure )
     ENVIRONMENT_GUARD executableGuard( wxS( "KICHAD_CODEX_EXECUTABLE" ), script );
     ENVIRONMENT_GUARD homeGuard( wxS( "KICHAD_CODEX_HOME" ), codexHome );
     ENVIRONMENT_GUARD captureGuard( wxS( "KICHAD_CODEX_CAPTURE" ), capture );
+    ENVIRONMENT_GUARD configGuard( wxS( "XDG_CONFIG_HOME" ), configHome );
     CODEX_APP_SERVER_CLIENT client;
     bool reportedUnavailable = false;
     client.SetStateHandler(
@@ -118,16 +133,42 @@ BOOST_AUTO_TEST_CASE( DeliversLargeJsonRpcFrameAcrossPipeBackpressure )
     }
 
     BOOST_REQUIRE_MESSAGE( captured, "slow app-server did not receive the complete JSON-RPC frame" );
-    wxFFile captureFile( capture, wxS( "rb" ) );
-    BOOST_REQUIRE( captureFile.IsOpened() );
-    wxString capturedText;
-    BOOST_REQUIRE( captureFile.ReadAll( &capturedText, wxConvUTF8 ) );
-    captureFile.Close();
-    const std::string bytes( capturedText.ToUTF8() );
+    const std::string bytes = readFileSnapshot( capture );
     const size_t newline = bytes.find( '\n' );
     BOOST_REQUIRE_NE( newline, std::string::npos );
     BOOST_CHECK_EQUAL( bytes.substr( 0, newline + 1 ), expected );
     BOOST_CHECK( !reportedUnavailable );
+
+    const std::string secret = "private-answer-must-not-enter-the-log";
+    const nlohmann::json sensitiveResponse = {
+        { "id", 72 }, { "result", { { "answers", { { "private", secret } } } } }
+    };
+    const std::string expectedSensitive = sensitiveResponse.dump() + "\n";
+    BOOST_REQUIRE( client.SendResponse( 72, sensitiveResponse["result"], true ) );
+
+    bool sensitiveCaptured = false;
+    std::string capturedBytes;
+
+    for( int attempt = 0; attempt < 80 && !sensitiveCaptured; ++attempt )
+    {
+        wxMilliSleep( 25 );
+        capturedBytes = readFileSnapshot( capture );
+        sensitiveCaptured = capturedBytes.find( expectedSensitive ) != std::string::npos;
+    }
+
+    BOOST_REQUIRE_MESSAGE( sensitiveCaptured,
+                           "slow app-server did not receive the sensitive JSON-RPC frame" );
+    BOOST_CHECK_NE( capturedBytes.find( expectedSensitive ), std::string::npos );
+
+    const wxString diagnosticLog =
+            wxFileName( wxFileName( configHome, wxS( "kichad" ) ).GetFullPath(),
+                        wxS( "kichad-codex.log" ) ).GetFullPath();
+    wxFFile logFile( diagnosticLog, wxS( "rb" ) );
+    BOOST_REQUIRE( logFile.IsOpened() );
+    wxString logText;
+    BOOST_REQUIRE( logFile.ReadAll( &logText, wxConvUTF8 ) );
+    BOOST_CHECK_EQUAL( std::string( logText.ToUTF8() ).find( secret ), std::string::npos );
+    BOOST_CHECK_NE( std::string( logText.ToUTF8() ).find( "[REDACTED]" ), std::string::npos );
 
     client.Stop();
     BOOST_CHECK( wxFileName::Rmdir( root, wxPATH_RMDIR_RECURSIVE ) );

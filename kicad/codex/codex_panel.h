@@ -14,6 +14,8 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -35,6 +37,7 @@ class wxChoice;
 class wxStaticText;
 class wxTextCtrl;
 class wxThreadEvent;
+class CODEX_USER_INPUT_DIALOG;
 
 
 /** Native docked Codex conversation surface owned by the KiChad project manager. */
@@ -73,6 +76,18 @@ private:
         wxString                                detail;
     };
 
+    struct PENDING_USER_INPUT_REQUEST
+    {
+        JSON requestId;
+        JSON params;
+    };
+
+    struct PENDING_STEER
+    {
+        std::string expectedTurnId;
+        wxString    message;
+    };
+
     void initializeAppServer();
     void readAccount( bool aRefreshToken = false );
     void readModels();
@@ -86,6 +101,17 @@ private:
                              std::function<void()> aReadyHandler );
     void startThread( std::function<void()> aReadyHandler );
     void startTurn( const std::string& aMessage );
+    void steerTurn( const wxString& aMessage );
+    void restoreInputMessage( const wxString& aMessage );
+    void failPendingSteers( const wxString& aReason );
+    void handleUserInputRequest( const JSON& aMessage );
+    void showNextUserInputRequest();
+    bool submitUserInputResponse( const JSON& aRequestId, const JSON& aResponse,
+                                  const std::string& aPersistedText,
+                                  const wxString& aTranscript, bool aSensitive );
+    bool stopForUserInput( const JSON& aRequestId );
+    void resolveUserInputRequest( const JSON& aRequestId );
+    void clearUserInputRequests();
     bool handleGoalCommand( const wxString& aMessage );
     void showGoal();
     void setGoal( const wxString& aObjective, bool aActivate );
@@ -150,6 +176,7 @@ private:
     wxButton*                 m_stopButton;
     wxButton*                 m_revertButton;
     wxButton*                 m_newConversationButton;
+    CODEX_USER_INPUT_DIALOG*  m_userInputDialog;
     std::vector<JSON>         m_models;
     std::vector<CODEX_THREAD_STORE::MESSAGE> m_conversationHistory;
     bool                      m_externalLayoutMode;
@@ -161,13 +188,16 @@ private:
     wxString                  m_turnSnapshotHash;
     wxString                  m_preferredModel;
     wxString                  m_preferredReasoningEffort;
-    std::map<int, std::thread> m_toolWorkers;
-    std::map<int, JSON>       m_toolRequestIds;
-    std::mutex                m_toolEventMutex;
-    std::mutex                m_dependencyRequestMutex;
+    std::map<int, std::thread>             m_toolWorkers;
+    std::map<int, JSON>                    m_toolRequestIds;
+    std::deque<PENDING_USER_INPUT_REQUEST> m_pendingUserInputRequests;
+    std::map<uint64_t, PENDING_STEER>       m_pendingSteers;
+    std::mutex                             m_toolEventMutex;
+    std::mutex                             m_dependencyRequestMutex;
     std::shared_ptr<RUNTIME_DEPENDENCY_REQUEST> m_pendingDependencyRequest;
     std::atomic<bool>         m_shuttingDown;
     int                       m_nextToolTaskId;
+    uint64_t                  m_nextSteerMessageId;
     bool                      m_initialized;
     bool                      m_authenticated;
     bool                      m_conversationLoaded;

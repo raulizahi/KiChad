@@ -13,6 +13,38 @@
 
 #include <kicad/codex/design_script_compiler.h>
 #include <kicad/codex/design_script_footprint_library_generator.h>
+#include <kicad/codex/codex_tool_internal.h>
+#include <kicad/codex/managed_footprint_library_io.h>
+
+#include <wx/utils.h>
+
+
+namespace
+{
+
+class BUILD_CLI_ENVIRONMENT
+{
+public:
+    BUILD_CLI_ENVIRONMENT() :
+            m_hadPrevious( wxGetEnv( wxS( "KICAD_RUN_FROM_BUILD_DIR" ), &m_previous ) )
+    {
+        wxSetEnv( wxS( "KICAD_RUN_FROM_BUILD_DIR" ), wxS( "1" ) );
+    }
+
+    ~BUILD_CLI_ENVIRONMENT()
+    {
+        if( m_hadPrevious )
+            wxSetEnv( wxS( "KICAD_RUN_FROM_BUILD_DIR" ), m_previous );
+        else
+            wxUnsetEnv( wxS( "KICAD_RUN_FROM_BUILD_DIR" ) );
+    }
+
+private:
+    bool     m_hadPrevious;
+    wxString m_previous;
+};
+
+} // namespace
 
 
 BOOST_AUTO_TEST_SUITE( DesignScriptFootprintAuthoring )
@@ -81,9 +113,13 @@ BOOST_AUTO_TEST_CASE( LowersStandardPadsAndModelsToCurrentDeterministicFootprint
       (number 3) (type smd) (shape trapezoid) (at 0mm 1.5mm)
       (size 1mm 0.8mm) (layers F.Cu F.Mask)
       (trapezoid_delta 0.8mm 0mm))
+    (pad stencil_window
+      (number "") (type smd) (shape roundrect) (at 0mm -1.5mm)
+      (size 0.8mm 0.8mm) (layers F.Paste) (roundrect_radius 0.2mm))
     (model "${KIPRJMOD}/models/SENSOR_2P.step"
       (visible true) (opacity 0.75)
-      (offset 0mm 0mm 0.1mm) (scale 1 1 1) (rotation 0deg 0deg 90deg)))
+      (offset 0mm 0mm 0.1mm) (scale 1 1 1) (rotation 0deg 0deg 90deg))
+    (model "${KICAD10_3DMODEL_DIR}/Package_SON.3dshapes/WSON-8_4x4mm_P0.8mm.step"))
   (footprint Product:HEADER_1X01
     (reference J) (value HEADER_1X01)
     (attributes (through_hole true))
@@ -138,6 +174,8 @@ BOOST_AUTO_TEST_CASE( LowersStandardPadsAndModelsToCurrentDeterministicFootprint
                               "(prefer_zone_connections yes))" ),
                     std::string::npos );
     BOOST_CHECK_NE( smd.find( "(rect_delta 0.8 0)" ), std::string::npos );
+    BOOST_CHECK_NE( smd.find( "(pad \"\" smd roundrect" ), std::string::npos );
+    BOOST_CHECK_NE( smd.find( "(layers \"F.Paste\")" ), std::string::npos );
     BOOST_CHECK_NE( smd.find( "(solder_paste_margin_ratio -0.1)" ), std::string::npos );
     BOOST_CHECK_NE( smd.find( "(thermal_bridge_angle 45)" ), std::string::npos );
     BOOST_CHECK_NE( smd.find( "(fp_rect" ), std::string::npos );
@@ -149,6 +187,9 @@ BOOST_AUTO_TEST_CASE( LowersStandardPadsAndModelsToCurrentDeterministicFootprint
                     std::string::npos );
     BOOST_CHECK_NE( smd.find( "(opacity 0.75)" ), std::string::npos );
     BOOST_CHECK_NE( smd.find( "(rotate (xyz 0 0 90))" ), std::string::npos );
+    BOOST_CHECK_NE( smd.find( "${KICAD10_3DMODEL_DIR}/Package_SON.3dshapes/"
+                              "WSON-8_4x4mm_P0.8mm.step" ),
+                    std::string::npos );
     BOOST_CHECK_NE( tht.find( "(pad \"1\" thru_hole circle" ), std::string::npos );
     BOOST_CHECK_NE( tht.find( "(drill 1)" ), std::string::npos );
     BOOST_CHECK_NE( tht.find( "(layers \"*.Cu\" \"*.Mask\")" ), std::string::npos );
@@ -157,11 +198,31 @@ BOOST_AUTO_TEST_CASE( LowersStandardPadsAndModelsToCurrentDeterministicFootprint
     BOOST_CHECK_NE( tht.find( "(pad \"\" np_thru_hole circle" ), std::string::npos );
     BOOST_CHECK_EQUAL( first.counts["libraries"], 1 );
     BOOST_CHECK_EQUAL( first.counts["footprints"], 2 );
-    BOOST_CHECK_EQUAL( first.counts["pads"], 5 );
+    BOOST_CHECK_EQUAL( first.counts["pads"], 6 );
     BOOST_CHECK_EQUAL( first.counts["graphics"], 6 );
     BOOST_CHECK_EQUAL( first.counts["texts"], 1 );
     BOOST_CHECK_EQUAL( first.counts["textBoxes"], 1 );
-    BOOST_CHECK_EQUAL( first.counts["models"], 1 );
+    BOOST_CHECK_EQUAL( first.counts["models"], 2 );
+
+    KICHAD::CODEX_TOOLS::PRIVATE_TEMPORARY_DIRECTORY temporary;
+    BUILD_CLI_ENVIRONMENT buildEnvironment;
+    std::string nativeError;
+    BOOST_REQUIRE_MESSAGE( temporary.Create( "kichad-aperture-native", nativeError ),
+                           nativeError );
+    wxFileName nativeLibrary = wxFileName::DirName(
+            wxString::FromUTF8( temporary.Path().string() ) );
+    nativeLibrary.AppendDir( wxS( "Product.pretty" ) );
+    KICHAD::MANAGED_FOOTPRINT_LIBRARY_IO::FILES nativeFiles = {
+        { "SENSOR_2P.kicad_mod", smd }
+    };
+    BOOST_REQUIRE_MESSAGE(
+            KICHAD::MANAGED_FOOTPRINT_LIBRARY_IO::InstallAtomically(
+                    nativeLibrary, true, nativeFiles, nativeError ),
+            nativeError );
+    BOOST_REQUIRE_MESSAGE(
+            KICHAD::MANAGED_FOOTPRINT_LIBRARY_IO::ValidateNative(
+                    nativeLibrary, nativeError ),
+            nativeError );
 }
 
 
@@ -189,6 +250,22 @@ BOOST_AUTO_TEST_CASE( RejectsUnsafeOrPhysicallyInvalidFootprintSemantics )
   (footprint Product:OVERSIZE_DRILL
     (pad p1 (number 1) (type thru_hole) (shape circle) (at 0mm 0mm)
       (size 1mm 1mm) (layers all_copper all_mask) (drill round 2mm)))
+  (footprint Product:NUMBERED_APERTURE
+    (pad stencil (number 1) (type smd) (shape rect) (at 0mm 0mm)
+      (size 1mm 1mm) (layers F.Paste)))
+  (footprint Product:TWO_SIDED_APERTURE
+    (pad stencil (number "") (type smd) (shape rect) (at 0mm 0mm)
+      (size 1mm 1mm) (layers F.Paste B.Paste)))
+  (footprint Product:ELECTRICAL_APERTURE
+    (pad stencil (number "") (type smd) (shape rect) (at 0mm 0mm)
+      (size 1mm 1mm) (layers F.Paste)
+      (pin_function STENCIL) (zone_connection solid)))
+  (footprint Product:MASK_MARGIN_WITHOUT_MASK
+    (pad stencil (number "") (type smd) (shape rect) (at 0mm 0mm)
+      (size 1mm 1mm) (layers F.Paste) (solder_mask_margin 0.05mm)))
+  (footprint Product:PASTE_MARGIN_WITHOUT_PASTE
+    (pad opening (number "") (type smd) (shape rect) (at 0mm 0mm)
+      (size 1mm 1mm) (layers F.Mask) (solder_paste_margin 0.05mm)))
   (footprint Product:WINDOWS_TRAVERSAL
     (pad p1 (number 1) (type smd) (shape rect) (at 0mm 0mm)
       (size 1mm 1mm) (layers F.Cu F.Mask))
@@ -224,6 +301,17 @@ BOOST_AUTO_TEST_CASE( RejectsUnsafeOrPhysicallyInvalidFootprintSemantics )
     BOOST_CHECK_NE( diagnostics.find( "invalid_authored_footprint_pad_circle_size" ),
                     std::string::npos );
     BOOST_CHECK_NE( diagnostics.find( "invalid_authored_footprint_pad_drill_size" ),
+                    std::string::npos );
+    BOOST_CHECK_NE( diagnostics.find( "numbered_authored_footprint_aperture_pad" ),
+                    std::string::npos );
+    BOOST_CHECK_NE( diagnostics.find( "invalid_authored_footprint_aperture_pad_layers" ),
+                    std::string::npos );
+    BOOST_CHECK_NE(
+            diagnostics.find( "invalid_authored_footprint_aperture_pad_electrical_metadata" ),
+            std::string::npos );
+    BOOST_CHECK_NE( diagnostics.find( "invalid_authored_footprint_aperture_pad_mask_margin" ),
+                    std::string::npos );
+    BOOST_CHECK_NE( diagnostics.find( "invalid_authored_footprint_aperture_pad_paste_margin" ),
                     std::string::npos );
     BOOST_CHECK_NE( diagnostics.find( "unknown_authored_footprint_jumper_pad" ),
                     std::string::npos );

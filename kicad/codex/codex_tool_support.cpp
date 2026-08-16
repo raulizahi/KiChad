@@ -37,6 +37,7 @@
 #include "lossless_sexpr_document.h"
 
 #include <build_version.h>
+#include <env_vars.h>
 #include <kiid.h>
 #include <libraries/library_table_parser.h>
 #include <paths.h>
@@ -1064,6 +1065,147 @@ bool inventoryProjectFootprints( const wxString& aProjectPath,
 }
 
 
+bool validateFootprintModelAssets( const wxString& aProjectPath,
+                                   const nlohmann::json& aCompilerIr,
+                                   nlohmann::json& aSummary, std::string& aError )
+{
+    constexpr std::string_view projectPrefix = "${KIPRJMOD}/";
+    constexpr std::string_view stockPrefix = "${KICAD10_3DMODEL_DIR}/";
+    constexpr size_t maxModels = 4096;
+    constexpr uint64_t maxModelBytes = 512ULL * 1024ULL * 1024ULL;
+    aSummary = { { "checked", static_cast<uint64_t>( 0 ) },
+                 { "project", static_cast<uint64_t>( 0 ) },
+                 { "stock", static_cast<uint64_t>( 0 ) } };
+
+    if( !aCompilerIr.is_object() || !aCompilerIr.contains( "authoredFootprints" )
+        || !aCompilerIr["authoredFootprints"].is_array() )
+    {
+        aError = "compiled KDS does not contain a valid authored-footprint inventory";
+        return false;
+    }
+
+    wxFileName projectRoot = wxFileName::DirName( aProjectPath );
+    projectRoot.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+
+    if( !canonicalizeExisting( projectRoot, true ) )
+    {
+        aError = "active project path could not be resolved for 3D model validation";
+        return false;
+    }
+
+    wxString stockModelPath;
+
+    if( !wxGetEnv( ENV_VAR::GetVersionedEnvVarName( wxS( "3DMODEL_DIR" ) ),
+                   &stockModelPath )
+        || stockModelPath.IsEmpty() )
+    {
+        stockModelPath = PATHS::GetStock3dmodelsPath();
+    }
+
+    wxFileName stockRoot = wxFileName::DirName( stockModelPath );
+    const bool hasStockRoot = canonicalizeExisting( stockRoot, true );
+    std::set<wxString> validated;
+
+    for( const nlohmann::json& footprint : aCompilerIr["authoredFootprints"] )
+    {
+        if( !footprint.is_object() || !footprint.contains( "id" )
+            || !footprint["id"].is_string() || !footprint.contains( "models" )
+            || !footprint["models"].is_array() )
+        {
+            aError = "compiled KDS contains malformed authored-footprint model metadata";
+            return false;
+        }
+
+        const std::string footprintId = footprint["id"].get<std::string>();
+
+        for( const nlohmann::json& model : footprint["models"] )
+        {
+            if( aSummary["checked"].get<size_t>() >= maxModels || !model.is_object()
+                || !model.contains( "path" ) || !model["path"].is_string() )
+            {
+                aError = "authored-footprint 3D model inventory is malformed or excessive";
+                return false;
+            }
+
+            const std::string path = model["path"].get<std::string>();
+            const bool projectModel = path.starts_with( projectPrefix );
+            const bool stockModel = path.starts_with( stockPrefix );
+
+            if( !projectModel && !stockModel )
+            {
+                aError = "footprint " + footprintId
+                         + " contains an unsupported 3D model root: " + path;
+                return false;
+            }
+
+            if( stockModel && !hasStockRoot )
+            {
+                aError = "installed KiCad 10 stock 3D model root is unavailable while resolving "
+                         + path + " for footprint " + footprintId;
+                return false;
+            }
+
+            const std::string_view prefix = projectModel ? projectPrefix : stockPrefix;
+            const std::string relative = path.substr( prefix.size() );
+            wxFileName root = projectModel ? projectRoot : stockRoot;
+            wxFileName candidate( root.GetPathWithSep() + wxString::FromUTF8( relative ) );
+            candidate.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+            const wxString declaredPath = candidate.GetFullPath();
+
+            if( relative.empty() || !candidate.FileExists() )
+            {
+                aError = "3D model " + path + " for footprint " + footprintId
+                         + ( projectModel ? " does not exist in the project"
+                                          : " is not installed with KiCad 10" );
+                return false;
+            }
+
+            if( !canonicalizeExisting( candidate ) )
+            {
+                aError = "3D model " + path + " for footprint " + footprintId
+                         + " could not be resolved";
+                return false;
+            }
+
+            wxString canonicalPath = candidate.GetFullPath();
+            wxString rootPath = root.GetPathWithSep();
+            wxString comparableDeclared = declaredPath;
+
+#ifdef __WXMSW__
+            canonicalPath.MakeLower();
+            rootPath.MakeLower();
+            comparableDeclared.MakeLower();
+#endif
+
+            if( canonicalPath != comparableDeclared || !canonicalPath.StartsWith( rootPath ) )
+            {
+                aError = "3D model " + path + " for footprint " + footprintId
+                         + " must be a regular non-symlink file inside its declared model root";
+                return false;
+            }
+
+            const wxULongLong bytes = candidate.GetSize();
+
+            if( bytes == wxInvalidSize || bytes.GetValue() == 0
+                || bytes.GetValue() > maxModelBytes )
+            {
+                aError = "3D model " + path + " for footprint " + footprintId
+                         + " is empty, unreadable, or exceeds 512 MiB";
+                return false;
+            }
+
+            if( validated.emplace( canonicalPath ).second )
+            {
+                ++aSummary["checked"].get_ref<uint64_t&>();
+                ++aSummary[projectModel ? "project" : "stock"].get_ref<uint64_t&>();
+            }
+        }
+    }
+
+    return true;
+}
+
+
 bool readOptionalSchematic( const wxFileName& aPath, bool& aPresent, std::string& aSource,
                             std::string& aError )
 {
@@ -1274,6 +1416,8 @@ bool findNativeKiCadCli( wxFileName& aCli )
 
 
 bool validateNativeSchematicHierarchy( const wxFileName& aRootSchematic,
+                                       const JSON* aCompilerIr,
+                                       const JSON* aResolvedSymbols,
                                        std::string& aError )
 {
     namespace bp = boost::process;
@@ -1355,6 +1499,38 @@ bool validateNativeSchematicHierarchy( const wxFileName& aRootSchematic,
                 {
                     aError += ": " + detail;
                 }
+            }
+        }
+    }
+
+    if( aError.empty() && aCompilerIr != nullptr )
+    {
+        JSON plan;
+        std::string connectivityError;
+
+        if( aResolvedSymbols != nullptr
+            && !KICHAD::CODEX_TOOLS::BuildNativeNetlistValidationPlan(
+                    *aCompilerIr, *aResolvedSymbols,
+                    aRootSchematic.GetName().ToStdString(), plan,
+                    connectivityError ) )
+        {
+            aError = "native schematic connectivity validation could not determine "
+                     "KiCad netlist eligibility: " + connectivityError;
+        }
+        else
+        {
+            if( aResolvedSymbols == nullptr )
+            {
+                plan = KICHAD::CODEX_TOOLS::BuildFabricationPlan(
+                        *aCompilerIr, aRootSchematic.GetName().ToStdString() );
+            }
+
+            if( !KICHAD::FABRICATION_ARTIFACT_VALIDATOR::ValidateKiCadNetlist(
+                        std::filesystem::path( output.GetFullPath().ToStdString() ),
+                        plan, connectivityError ) )
+            {
+                aError = "native schematic connectivity does not match compiled KDS: "
+                         + connectivityError;
             }
         }
     }
@@ -1589,134 +1765,15 @@ bool runNativeFabricationCommand( const wxFileName& aCli,
 }
 
 
-bool runNativeKiCadPreview( const std::string& aView, const wxFileName& aInput,
-                            const wxFileName& aOutput, int aPage, std::string& aError )
+bool writeCroppedPreview( const wxFileName& aRasterized, const wxFileName& aOutput,
+                          std::string& aError )
 {
-    wxFileName cli;
-
-    if( !findNativeKiCadCli( cli ) )
-    {
-        aError = "the sibling kicad-cli preview backend is unavailable";
-        return false;
-    }
-
-    PRIVATE_TEMPORARY_DIRECTORY temporary;
-
-    if( !temporary.Create( "kichad-preview", aError ) )
-        return false;
-
-    wxFileName logs = wxFileName::DirName(
-            wxString::FromUTF8( temporary.Path().string() ) );
-
-    if( aOutput.FileExists() && !wxRemoveFile( aOutput.GetFullPath() ) )
-    {
-        aError = "could not replace the prior derived preview";
-        return false;
-    }
-
-    if( aView == "pcb3d" )
-    {
-        const std::vector<std::string> arguments = {
-            "pcb", "render", "--output", aOutput.GetFullPath().ToStdString(),
-            "--width", "1600", "--height", "1200", "--side", "top",
-            "--background", "opaque", "--quality", "high", "--preset",
-            "follow_plot_settings", aInput.GetFullPath().ToStdString()
-        };
-
-        if( !runNativeFabricationCommand( cli, arguments, logs, 0, "PCB preview", aError ) )
-            return false;
-
-        if( !aOutput.FileExists() )
-        {
-            aError = "native KiCad did not produce the requested PCB preview";
-            return false;
-        }
-
-        return true;
-    }
-
-    wxFileName pdf( wxString::FromUTF8( temporary.Path().string() ),
-                    wxS( "preview.pdf" ) );
-    std::vector<std::string> arguments;
-
-    if( aView == "schematic" )
-    {
-        arguments = { "sch", "export", "pdf", "--output",
-                      pdf.GetFullPath().ToStdString(), "--exclude-drawing-sheet",
-                      "--pages", std::to_string( aPage ),
-                      aInput.GetFullPath().ToStdString() };
-    }
-    else if( aView == "pcb2d" )
-    {
-        arguments = { "pcb", "export", "pdf", "--output",
-                      pdf.GetFullPath().ToStdString(), "--layers",
-                      "F.Cu,B.Cu,F.SilkS,B.SilkS,Edge.Cuts", "--mode-single",
-                      "--scale", "0", "--exclude-value", "--no-property-popups",
-                      aInput.GetFullPath().ToStdString() };
-    }
-    else if( aView == "pcblayout" )
-    {
-        arguments = { "pcb", "export", "pdf", "--output",
-                      pdf.GetFullPath().ToStdString(), "--layers",
-                      "F.Cu,B.Cu,F.SilkS,B.SilkS,F.Fab,B.Fab,F.CrtYd,B.CrtYd,Edge.Cuts",
-                      "--mode-single", "--scale", "0", "--no-property-popups",
-                      aInput.GetFullPath().ToStdString() };
-    }
-    else
-    {
-        aError = "unsupported native preview view";
-        return false;
-    }
-
-    if( !runNativeFabricationCommand( cli, arguments, logs, 0, aView + " preview", aError )
-        || !pdf.FileExists() )
-    {
-        if( aError.empty() )
-            aError = "native KiCad did not produce the preview PDF";
-
-        return false;
-    }
-
-    wxString executableSearchPath;
-    wxString rasterizer;
-
-    if( !wxGetEnv( wxS( "PATH" ), &executableSearchPath )
-        || !wxFindFileInPath( &rasterizer, executableSearchPath, wxS( "pdftoppm" ) ) )
-    {
-        aError = "the PDF-to-PNG preview rasterizer is unavailable";
-        return false;
-    }
-
-    wxFileName rasterizerPath( rasterizer );
-    wxFileName prefix( wxString::FromUTF8( temporary.Path().string() ),
-                       wxS( "rasterized" ) );
-    prefix.ClearExt();
-    const std::vector<std::string> rasterArguments = {
-        "-png", "-r", "160", "-singlefile", pdf.GetFullPath().ToStdString(),
-        prefix.GetFullPath().ToStdString()
-    };
-
-    if( !runNativeFabricationCommand( rasterizerPath, rasterArguments, logs, 1,
-                                      "preview rasterization", aError ) )
-    {
-        return false;
-    }
-
-    wxFileName rasterized = prefix;
-    rasterized.SetExt( wxS( "png" ) );
-
-    if( !rasterized.FileExists() )
-    {
-        aError = "preview rasterization did not produce a readable PNG";
-        return false;
-    }
-
     // PDF plots retain their entire paper rectangle.  Crop uniform page margins so the model
-    // receives the actual circuit at useful resolution instead of a mostly blank A4 image.
+    // receives the actual circuit at useful resolution instead of a mostly blank paper image.
     wxImage preview;
     bool wrotePreview = false;
 
-    if( preview.LoadFile( rasterized.GetFullPath(), wxBITMAP_TYPE_PNG ) && preview.IsOk()
+    if( preview.LoadFile( aRasterized.GetFullPath(), wxBITMAP_TYPE_PNG ) && preview.IsOk()
         && preview.GetWidth() > 0 && preview.GetHeight() > 0 && preview.GetData() )
     {
         const int width = preview.GetWidth();
@@ -1773,10 +1830,204 @@ bool runNativeKiCadPreview( const std::string& aView, const wxFileName& aInput,
     }
 
     if( !wrotePreview
-        && !wxCopyFile( rasterized.GetFullPath(), aOutput.GetFullPath(), true ) )
+        && !wxCopyFile( aRasterized.GetFullPath(), aOutput.GetFullPath(), true ) )
     {
         aError = "preview rasterization did not produce a readable PNG";
         return false;
+    }
+
+    return true;
+}
+
+
+bool runNativeKiCadPreview( const std::string& aView, const wxFileName& aInput,
+                            const std::vector<int>& aPages,
+                            const std::vector<wxFileName>& aOutputs,
+                            std::string& aError )
+{
+    if( aPages.empty() || aPages.size() != aOutputs.size() )
+    {
+        aError = "native preview requires one output for every requested page";
+        return false;
+    }
+
+    wxFileName cli;
+
+    if( !findNativeKiCadCli( cli ) )
+    {
+        aError = "the sibling kicad-cli preview backend is unavailable";
+        return false;
+    }
+
+    PRIVATE_TEMPORARY_DIRECTORY temporary;
+
+    if( !temporary.Create( "kichad-preview", aError ) )
+        return false;
+
+    wxFileName logs = wxFileName::DirName(
+            wxString::FromUTF8( temporary.Path().string() ) );
+
+    for( size_t i = 0; i < aOutputs.size(); ++i )
+    {
+        if( aPages[i] < 1 || aPages[i] > 1000 )
+        {
+            aError = "native schematic preview page must be between 1 and 1000";
+            return false;
+        }
+
+        if( aOutputs[i].FileExists() && !wxRemoveFile( aOutputs[i].GetFullPath() ) )
+        {
+            aError = "could not replace the prior derived preview";
+            return false;
+        }
+    }
+
+    if( aView == "pcb3d" )
+    {
+        if( aOutputs.size() != 1 )
+        {
+            aError = "PCB previews require exactly one output";
+            return false;
+        }
+
+        const std::vector<std::string> arguments = {
+            "pcb", "render", "--output", aOutputs.front().GetFullPath().ToStdString(),
+            "--width", "1600", "--height", "1200", "--side", "top",
+            "--background", "opaque", "--quality", "high", "--preset",
+            "follow_plot_settings", aInput.GetFullPath().ToStdString()
+        };
+
+        if( !runNativeFabricationCommand( cli, arguments, logs, 0, "PCB preview", aError ) )
+            return false;
+
+        if( !aOutputs.front().FileExists() )
+        {
+            aError = "native KiCad did not produce the requested PCB preview";
+            return false;
+        }
+
+        return true;
+    }
+
+    wxFileName pdf( wxString::FromUTF8( temporary.Path().string() ),
+                    wxS( "preview.pdf" ) );
+    std::vector<std::string> arguments;
+
+    if( aView == "schematic" )
+    {
+        std::string pages;
+
+        for( int page : aPages )
+        {
+            if( !pages.empty() )
+                pages += ',';
+
+            pages += std::to_string( page );
+        }
+
+        arguments = { "sch", "export", "pdf", "--output",
+                      pdf.GetFullPath().ToStdString(), "--exclude-drawing-sheet",
+                      "--pages", pages,
+                      aInput.GetFullPath().ToStdString() };
+    }
+    else if( aView == "pcb2d" )
+    {
+        if( aOutputs.size() != 1 )
+        {
+            aError = "PCB previews require exactly one output";
+            return false;
+        }
+
+        arguments = { "pcb", "export", "pdf", "--output",
+                      pdf.GetFullPath().ToStdString(), "--layers",
+                      "F.Cu,B.Cu,F.SilkS,B.SilkS,Edge.Cuts", "--mode-single",
+                      "--scale", "0", "--exclude-value", "--no-property-popups",
+                      aInput.GetFullPath().ToStdString() };
+    }
+    else if( aView == "pcblayout" )
+    {
+        if( aOutputs.size() != 1 )
+        {
+            aError = "PCB previews require exactly one output";
+            return false;
+        }
+
+        arguments = { "pcb", "export", "pdf", "--output",
+                      pdf.GetFullPath().ToStdString(), "--layers",
+                      "F.Cu,B.Cu,F.SilkS,B.SilkS,F.Fab,B.Fab,F.CrtYd,B.CrtYd,Edge.Cuts",
+                      "--mode-single", "--scale", "0", "--no-property-popups",
+                      aInput.GetFullPath().ToStdString() };
+    }
+    else
+    {
+        aError = "unsupported native preview view";
+        return false;
+    }
+
+    if( !runNativeFabricationCommand( cli, arguments, logs, 0, aView + " preview", aError )
+        || !pdf.FileExists() )
+    {
+        if( aError.empty() )
+            aError = "native KiCad did not produce the preview PDF";
+
+        return false;
+    }
+
+    wxString executableSearchPath;
+    wxString rasterizer;
+
+    if( !wxGetEnv( wxS( "PATH" ), &executableSearchPath )
+        || !wxFindFileInPath( &rasterizer, executableSearchPath, wxS( "pdftoppm" ) ) )
+    {
+        aError = "the PDF-to-PNG preview rasterizer is unavailable";
+        return false;
+    }
+
+    wxFileName rasterizerPath( rasterizer );
+    wxFileName prefix( wxString::FromUTF8( temporary.Path().string() ),
+                       wxS( "rasterized" ) );
+    prefix.ClearExt();
+    std::vector<std::string> rasterArguments = { "-png", "-r", "160" };
+
+    if( aOutputs.size() == 1 )
+        rasterArguments.emplace_back( "-singlefile" );
+
+    rasterArguments.emplace_back( pdf.GetFullPath().ToStdString() );
+    rasterArguments.emplace_back( prefix.GetFullPath().ToStdString() );
+
+    if( !runNativeFabricationCommand( rasterizerPath, rasterArguments, logs, 1,
+                                      "preview rasterization", aError ) )
+    {
+        return false;
+    }
+
+    for( size_t i = 0; i < aOutputs.size(); ++i )
+    {
+        wxFileName rasterized = prefix;
+
+        if( aOutputs.size() == 1 )
+        {
+            rasterized.SetExt( wxS( "png" ) );
+        }
+        else
+        {
+            rasterized.SetFullName( prefix.GetName() + wxString::Format( "-%zu.png", i + 1 ) );
+        }
+
+        if( !rasterized.FileExists()
+            || !writeCroppedPreview( rasterized, aOutputs[i], aError ) )
+        {
+            if( aError.empty() )
+                aError = "preview rasterization did not produce every requested page";
+
+            for( const wxFileName& output : aOutputs )
+            {
+                if( output.FileExists() )
+                    wxRemoveFile( output.GetFullPath() );
+            }
+
+            return false;
+        }
     }
 
     return true;
@@ -2080,13 +2331,23 @@ JSON buildFabricationPlan( const JSON& aIr, const std::string& aFileStem )
     }
 
     JSON implicitPresentationNets = JSON::array();
+    size_t automaticNetCount = 0;
     size_t wiredNetCount = 0;
+    size_t hierarchicalNetCount = 0;
     size_t labelNetCount = 0;
 
     for( const JSON& net : aIr.at( "schematic" ).at( "nets" ) )
     {
-        if( net.value( "presentation", "labels" ) == "wired" )
+        // Label-first presentation is the KiChad default; "auto" is still counted so the
+        // reported net-presentation breakdown stays truthful for boards that request it.
+        const std::string presentation = net.value( "presentation", "labels" );
+
+        if( presentation == "auto" )
+            ++automaticNetCount;
+        else if( presentation == "wired" )
             ++wiredNetCount;
+        else if( presentation == "hierarchical" )
+            ++hierarchicalNetCount;
         else
             ++labelNetCount;
 
@@ -2444,7 +2705,10 @@ JSON buildFabricationPlan( const JSON& aIr, const std::string& aFileStem )
              { "issues", std::move( issues ) },
              { "runningIssues", std::move( runningIssues ) },
              { "schematicPresentation",
-                 { { "wiredNets", wiredNetCount }, { "labelNets", labelNetCount },
+                 { { "automaticNets", automaticNetCount },
+                   { "wiredNets", wiredNetCount },
+                   { "hierarchicalNets", hierarchicalNetCount },
+                   { "labelNets", labelNetCount },
                    { "implicitNets", implicitPresentationNets.size() } } },
              { "layout", std::move( layout.summary ) },
              { "productionPlan", std::move( productionPlan ) },
@@ -2456,6 +2720,103 @@ JSON buildFabricationPlan( const JSON& aIr, const std::string& aFileStem )
              { "expectedSchematicBomRows", std::move( expectedSchematicBomRows ) },
              { "expectedSchematicPdfTitle", std::move( expectedSchematicPdfTitle ) },
              { "jobs", std::move( jobs ) } };
+}
+
+
+bool buildNativeNetlistValidationPlan(
+        const JSON& aIr, const JSON& aResolvedSymbols, const std::string& aFileStem,
+        JSON& aPlan, std::string& aError )
+{
+    if( !aIr.is_object() || !aIr.contains( "schematic" )
+        || !aIr["schematic"].is_object()
+        || !aIr["schematic"].contains( "components" )
+        || !aIr["schematic"]["components"].is_array()
+        || !aResolvedSymbols.is_object() )
+    {
+        aError = "native netlist eligibility input is malformed";
+        return false;
+    }
+
+    std::set<std::string> exportReferences;
+    std::set<std::string> allReferences;
+
+    for( const JSON& component : aIr["schematic"]["components"] )
+    {
+        if( !component.is_object() || !component.contains( "reference" )
+            || !component["reference"].is_string()
+            || !component.contains( "symbol" ) || !component["symbol"].is_string() )
+        {
+            aError = "compiled KDS contains a malformed component identity";
+            return false;
+        }
+
+        const std::string reference = component["reference"].get<std::string>();
+        const std::string libraryId = component["symbol"].get<std::string>();
+
+        if( reference.empty() || !allReferences.emplace( reference ).second )
+        {
+            aError = "compiled KDS contains an empty or duplicate component reference";
+            return false;
+        }
+
+        const auto resolved = aResolvedSymbols.find( libraryId );
+
+        if( resolved == aResolvedSymbols.end() || !resolved->is_object()
+            || !resolved->contains( "flags" ) || !resolved->at( "flags" ).is_object()
+            || !resolved->at( "flags" ).contains( "onBoard" )
+            || !resolved->at( "flags" ).at( "onBoard" ).is_boolean() )
+        {
+            aError = "resolved symbol " + libraryId
+                     + " has no exact native on-board eligibility";
+            return false;
+        }
+
+        if( resolved->at( "flags" ).at( "onBoard" ).get<bool>() )
+            exportReferences.emplace( reference );
+    }
+
+    aPlan = buildFabricationPlan( aIr, aFileStem );
+    aPlan["expectedNetlistReferences"] = JSON::array();
+
+    for( const std::string& reference : exportReferences )
+        aPlan["expectedNetlistReferences"].push_back( reference );
+
+    JSON filteredNets = JSON::array();
+
+    for( const JSON& net : aPlan.at( "expectedNetlistNets" ) )
+    {
+        JSON filteredNodes = JSON::array();
+
+        for( const JSON& node : net.at( "nodes" ) )
+        {
+            const std::string reference = node.at( "reference" ).get<std::string>();
+
+            if( exportReferences.contains( reference ) )
+                filteredNodes.push_back( node );
+        }
+
+        if( !filteredNodes.empty() )
+        {
+            JSON filtered = net;
+            filtered["nodes"] = std::move( filteredNodes );
+            filteredNets.push_back( std::move( filtered ) );
+        }
+    }
+
+    aPlan["expectedNetlistNets"] = std::move( filteredNets );
+    JSON filteredNoConnects = JSON::array();
+
+    for( const JSON& endpoint : aPlan.at( "expectedNetlistNoConnects" ) )
+    {
+        if( exportReferences.contains(
+                    endpoint.at( "reference" ).get<std::string>() ) )
+        {
+            filteredNoConnects.push_back( endpoint );
+        }
+    }
+
+    aPlan["expectedNetlistNoConnects"] = std::move( filteredNoConnects );
+    return true;
 }
 
 
@@ -4820,8 +5181,21 @@ bool mergeRecoveryJournal( const nlohmann::json& aJournal,
 
             if( existing != items.end() && existing->second != item )
             {
-                aError = "KiChad apply journal contains conflicting ownership";
-                return false;
+                nlohmann::json preparedIdentity = existing->second;
+                nlohmann::json previousIdentity = item;
+                preparedIdentity.erase( "footprintSourceSha256" );
+                previousIdentity.erase( "footprintSourceSha256" );
+
+                if( preparedIdentity != previousIdentity )
+                {
+                    aError = "KiChad apply journal contains conflicting ownership";
+                    return false;
+                }
+
+                // The editor transaction outcome is unknown.  Retain ownership but clear its
+                // source revision so the next apply must perform a verified replacement.
+                existing->second = std::move( preparedIdentity );
+                continue;
             }
 
             items.emplace( itemId, item );
@@ -5586,20 +5960,33 @@ bool queryPcbFootprintInventory( const KICHAD_IPC_CLIENT& aClient,
             continue;
 
         const std::string itemId = footprint.id().value();
+        const std::string libraryNickname =
+                footprint.definition().id().library_nickname();
+        const std::string entryName = footprint.definition().id().entry_name();
+
+        const bool hasLibraryId = !libraryNickname.empty() && !entryName.empty();
 
         if( !KIID::SniffTest( wxString::FromUTF8( itemId ) )
+            || ( hasLibraryId && ( libraryNickname.find( ':' ) != std::string::npos
+                                   || entryName.find( ':' ) != std::string::npos ) )
             || !returnedIds.emplace( itemId ).second )
         {
             aError = "KiCad returned an invalid or duplicate footprint identity";
             return false;
         }
 
-        aInventory.push_back(
-                { { "itemId", itemId },
-                  { "itemType", "footprint" },
-                  { "reference", reference },
-                  { "schematicLinked", !footprint.attributes().not_in_schematic()
-                                                && footprint.symbol_path().path_size() > 0 } } );
+        nlohmann::json inventory = {
+            { "itemId", itemId },
+            { "itemType", "footprint" },
+            { "reference", reference },
+            { "schematicLinked", !footprint.attributes().not_in_schematic()
+                                          && footprint.symbol_path().path_size() > 0 }
+        };
+
+        if( hasLibraryId )
+            inventory["libraryId"] = libraryNickname + ":" + entryName;
+
+        aInventory.push_back( std::move( inventory ) );
     }
 
     return true;
@@ -5775,6 +6162,284 @@ bool footprintFieldMatches( const kiapi::board::types::Field& aField,
                             const nlohmann::json& aPresentation );
 
 
+bool footprintSourceInventory( const std::string& aSource,
+                               std::multiset<std::string>& aPads,
+                               std::multiset<std::string>& aModels,
+                               std::string& aError )
+{
+    std::string parseError;
+    std::unique_ptr<KICHAD::LOSSLESS_SEXPR_DOCUMENT> document =
+            KICHAD::LOSSLESS_SEXPR_DOCUMENT::Parse( aSource, &parseError );
+
+    if( !document || document->Roots().size() != 1
+        || document->ListHead( document->Roots().front() ) != "footprint" )
+    {
+        aError = "resolved footprint source is not a valid native footprint: " + parseError;
+        return false;
+    }
+
+    const auto& nodes = document->Nodes();
+    const auto& root = nodes.at( document->Roots().front() );
+
+    for( size_t child : root.children )
+    {
+        const auto& node = nodes.at( child );
+        const std::string head = document->ListHead( child );
+
+        if( ( head != "pad" && head != "model" ) || node.children.size() < 2 )
+            continue;
+
+        const std::string value = document->AtomText( node.children[1] );
+
+        if( head == "pad" )
+            aPads.emplace( value );
+        else
+            aModels.emplace( value );
+    }
+
+    return true;
+}
+
+
+bool validateCreatedFootprint( const kiapi::board::types::FootprintInstance& aActive,
+                               const kiapi::board::types::FootprintInstance& aRequested,
+                               const nlohmann::json& aAction,
+                               const std::string& aSource, std::string& aError )
+{
+    const nlohmann::json& instance = aAction.at( "instance" );
+
+    const auto textMismatch = [&]( const char* aField, const std::string& aRequestedValue,
+                                   const std::string& aActiveValue ) -> bool
+    {
+        if( aActiveValue == aRequestedValue )
+            return false;
+
+        // Keep tool failures useful without dumping an unbounded datasheet, description, or
+        // user-defined value into the model context.
+        constexpr size_t maxDiagnosticBytes = 160;
+        const auto bounded = []( const std::string& aValue )
+        {
+            std::string value = aValue.substr( 0, maxDiagnosticBytes );
+
+            if( aValue.size() > maxDiagnosticBytes )
+                value += "...";
+
+            return nlohmann::json( value ).dump();
+        };
+        aError = std::string( "KiCad footprint replacement readback mismatch for " ) + aField
+                 + ": requested " + bounded( aRequestedValue ) + ", returned "
+                 + bounded( aActiveValue );
+        return true;
+    };
+    const auto integerMismatch = [&]( const char* aField, int64_t aRequestedValue,
+                                      int64_t aActiveValue ) -> bool
+    {
+        if( aActiveValue == aRequestedValue )
+            return false;
+
+        aError = std::string( "KiCad footprint replacement readback mismatch for " ) + aField
+                 + ": requested " + std::to_string( aRequestedValue ) + ", returned "
+                 + std::to_string( aActiveValue );
+        return true;
+    };
+
+    if( textMismatch( "id", aRequested.id().value(), aActive.id().value() )
+        || textMismatch( "reference", aRequested.reference_field().text().text().text(),
+                         aActive.reference_field().text().text().text() )
+        || textMismatch( "value", aRequested.value_field().text().text().text(),
+                         aActive.value_field().text().text().text() )
+        || textMismatch( "datasheet", aRequested.datasheet_field().text().text().text(),
+                         aActive.datasheet_field().text().text().text() )
+        || textMismatch( "description", aRequested.description_field().text().text().text(),
+                         aActive.description_field().text().text().text() )
+        || textMismatch( "library_nickname",
+                         aRequested.definition().id().library_nickname(),
+                         aActive.definition().id().library_nickname() )
+        || textMismatch( "library_entry", aRequested.definition().id().entry_name(),
+                         aActive.definition().id().entry_name() ) )
+    {
+        return false;
+    }
+
+    if( aActive.attributes().not_in_schematic() )
+    {
+        aError = "KiCad footprint replacement readback mismatch for not_in_schematic: "
+                 "requested false, returned true";
+        return false;
+    }
+
+    if( aActive.attributes().do_not_populate()
+        != aRequested.attributes().do_not_populate() )
+    {
+        aError = "KiCad footprint replacement readback mismatch for do_not_populate: requested "
+                 + std::string( aRequested.attributes().do_not_populate() ? "true" : "false" )
+                 + ", returned "
+                 + std::string( aActive.attributes().do_not_populate() ? "true" : "false" );
+        return false;
+    }
+
+    if( integerMismatch( "position.x_nm", aRequested.position().x_nm(),
+                         aActive.position().x_nm() )
+        || integerMismatch( "position.y_nm", aRequested.position().y_nm(),
+                            aActive.position().y_nm() ) )
+    {
+        return false;
+    }
+
+    const double orientationDelta = std::remainder(
+            aActive.orientation().value_degrees()
+                    - aRequested.orientation().value_degrees(),
+            360.0 );
+
+    if( std::abs( orientationDelta ) > 1e-9 )
+    {
+        aError = "KiCad footprint replacement readback mismatch for orientation_degrees: "
+                 "requested "
+                 + std::to_string( aRequested.orientation().value_degrees() ) + ", returned "
+                 + std::to_string( aActive.orientation().value_degrees() );
+        return false;
+    }
+
+    if( integerMismatch( "layer", static_cast<int64_t>( aRequested.layer() ),
+                         static_cast<int64_t>( aActive.layer() ) )
+        || integerMismatch( "locked", static_cast<int64_t>( aRequested.locked() ),
+                            static_cast<int64_t>( aActive.locked() ) )
+        || integerMismatch( "symbol_path.count", aRequested.symbol_path().path_size(),
+                            aActive.symbol_path().path_size() ) )
+    {
+        return false;
+    }
+
+    if( textMismatch( "symbol_sheet_name", aRequested.symbol_sheet_name(),
+                      aActive.symbol_sheet_name() )
+        || textMismatch( "symbol_sheet_filename", aRequested.symbol_sheet_filename(),
+                         aActive.symbol_sheet_filename() ) )
+    {
+        return false;
+    }
+
+    for( int i = 0; i < aRequested.symbol_path().path_size(); ++i )
+    {
+        if( aActive.symbol_path().path( i ).value()
+            != aRequested.symbol_path().path( i ).value() )
+        {
+            aError = "KiCad footprint replacement readback mismatch for symbol_path["
+                     + std::to_string( i ) + "]: requested "
+                     + nlohmann::json( aRequested.symbol_path().path( i ).value() ).dump()
+                     + ", returned "
+                     + nlohmann::json( aActive.symbol_path().path( i ).value() ).dump();
+            return false;
+        }
+    }
+
+    std::multiset<std::string> expectedPads;
+    std::multiset<std::string> expectedModels;
+
+    if( !footprintSourceInventory( aSource, expectedPads, expectedModels, aError ) )
+        return false;
+
+    std::multiset<std::string> activePads;
+    std::multiset<std::string> activeModels;
+    std::map<std::string, std::string> activeFields;
+    std::set<std::string> assignedPads;
+
+    for( const google::protobuf::Any& packed : aActive.definition().items() )
+    {
+        kiapi::board::types::Pad pad;
+        kiapi::board::types::Footprint3DModel model;
+        kiapi::board::types::Field field;
+
+        if( packed.UnpackTo( &pad ) )
+        {
+            activePads.emplace( pad.number() );
+            auto expectedNet = instance.at( "padNets" ).find( pad.number() );
+
+            if( expectedNet != instance.at( "padNets" ).end() )
+            {
+                if( pad.net().name() != expectedNet.value().get<std::string>() )
+                {
+                    aError = "KiCad footprint pad-net readback did not match KDS for pad "
+                             + pad.number();
+                    return false;
+                }
+
+                assignedPads.emplace( pad.number() );
+            }
+        }
+        else if( packed.UnpackTo( &model ) )
+        {
+            activeModels.emplace( model.filename() );
+        }
+        else if( packed.UnpackTo( &field ) )
+        {
+            if( !activeFields.emplace( field.name(), field.text().text().text() ).second )
+            {
+                aError = "KiCad footprint readback contains duplicate custom fields";
+                return false;
+            }
+        }
+    }
+
+    if( activePads != expectedPads )
+    {
+        aError = "KiCad footprint pad inventory did not match the parsed replacement source";
+        return false;
+    }
+
+    if( activeModels != expectedModels )
+    {
+        aError = "KiCad footprint 3D-model inventory did not match the replacement source";
+        return false;
+    }
+
+    if( assignedPads.size() != instance.at( "padNets" ).size() )
+    {
+        aError = "KiCad footprint replacement did not materialize every assigned KDS pad net";
+        return false;
+    }
+
+    static const std::set<std::string> mandatory = {
+        "Reference", "Value", "Footprint", "Datasheet", "Description"
+    };
+
+    for( auto field = instance.at( "fields" ).begin();
+         field != instance.at( "fields" ).end(); ++field )
+    {
+        if( mandatory.contains( field.key() ) )
+            continue;
+
+        auto active = activeFields.find( field.key() );
+
+        if( active == activeFields.end() || active->second != field.value().get<std::string>() )
+        {
+            aError = "KiCad footprint custom-field readback did not match KDS field "
+                     + field.key();
+            return false;
+        }
+    }
+
+    if( aAction.contains( "presentation" )
+        && aAction.at( "presentation" ).contains( "reference" )
+        && !footprintFieldMatches( aActive.reference_field(),
+                                   aAction.at( "presentation" ).at( "reference" ) ) )
+    {
+        aError = "KiCad footprint reference presentation readback did not match KDS";
+        return false;
+    }
+
+    if( aAction.contains( "presentation" )
+        && aAction.at( "presentation" ).contains( "value" )
+        && !footprintFieldMatches( aActive.value_field(),
+                                   aAction.at( "presentation" ).at( "value" ) ) )
+    {
+        aError = "KiCad footprint value presentation readback did not match KDS";
+        return false;
+    }
+
+    return true;
+}
+
+
 bool createFootprintFromSource( const KICHAD_IPC_CLIENT& aClient,
                                 const KICHAD_IPC_TARGET& aTarget,
                                 const nlohmann::json& aAction,
@@ -5788,7 +6453,7 @@ bool createFootprintFromSource( const KICHAD_IPC_CLIENT& aClient,
         || !aFootprintSources[libraryId].is_string() )
     {
         aError = "placed footprint " + libraryId
-                 + " is not available from a confined project-local library";
+                 + " is not available from a resolved project or installed stock library";
         return false;
     }
 
@@ -5803,6 +6468,11 @@ bool createFootprintFromSource( const KICHAD_IPC_CLIENT& aClient,
             aAction.at( "component" ).get<std::string>() );
     requested.mutable_value_field()->mutable_text()->mutable_text()->set_text(
             instance.at( "value" ).get<std::string>() );
+    const nlohmann::json& fields = instance.at( "fields" );
+    requested.mutable_datasheet_field()->mutable_text()->mutable_text()->set_text(
+            fields.value( "Datasheet", "" ) );
+    requested.mutable_description_field()->mutable_text()->mutable_text()->set_text(
+            fields.value( "Description", "" ) );
     requested.mutable_attributes()->set_not_in_schematic( false );
     requested.mutable_attributes()->set_do_not_populate( instance.at( "dnp" ).get<bool>() );
 
@@ -5844,9 +6514,15 @@ bool createFootprintFromSource( const KICHAD_IPC_CLIENT& aClient,
         requested.mutable_definition()->add_items()->PackFrom( pad );
     }
 
-    for( auto field = instance.at( "fields" ).begin();
-         field != instance.at( "fields" ).end(); ++field )
+    static const std::set<std::string> mandatory = {
+        "Reference", "Value", "Footprint", "Datasheet", "Description"
+    };
+
+    for( auto field = fields.begin(); field != fields.end(); ++field )
     {
+        if( mandatory.contains( field.key() ) )
+            continue;
+
         kiapi::board::types::Field requestedField;
         requestedField.set_name( field.key() );
         requestedField.mutable_text()->mutable_text()->set_text(
@@ -5860,6 +6536,13 @@ bool createFootprintFromSource( const KICHAD_IPC_CLIENT& aClient,
     parse.set_contents( aFootprintSources[libraryId].get<std::string>() );
     parse.mutable_item()->PackFrom( requested );
     parse.mutable_field_mask()->CopyFrom( presentationMask );
+
+    if( aAction.at( "action" ) == "replace_footprint" )
+    {
+        parse.mutable_replace_item_id()->set_value(
+                aAction.at( "replacedItemId" ).get<std::string>() );
+    }
+
     kiapi::common::ApiResponse parseResponse;
 
     if( !aClient.Call( aTarget, parse, parseResponse, aError ) )
@@ -5880,30 +6563,21 @@ bool createFootprintFromSource( const KICHAD_IPC_CLIENT& aClient,
 
     kiapi::board::types::FootprintInstance footprint;
 
-    if( !created.created_items( 0 ).item().UnpackTo( &footprint )
-        || footprint.id().value() != requested.id().value()
-        || footprint.reference_field().text().text().text()
-                   != aAction.at( "component" ).get<std::string>()
-        || footprint.definition().id().library_nickname()
-                   != requested.definition().id().library_nickname()
-        || footprint.definition().id().entry_name()
-                   != requested.definition().id().entry_name()
-        || footprint.symbol_path().path_size() != requested.symbol_path().path_size()
-        || footprint.position().x_nm() != requested.position().x_nm()
-        || footprint.position().y_nm() != requested.position().y_nm()
-        || footprint.layer() != requested.layer()
-        || ( aAction.contains( "presentation" )
-             && aAction.at( "presentation" ).contains( "reference" )
-             && !footprintFieldMatches(
-                     footprint.reference_field(),
-                     aAction.at( "presentation" ).at( "reference" ) ) )
-        || ( aAction.contains( "presentation" )
-             && aAction.at( "presentation" ).contains( "value" )
-             && !footprintFieldMatches(
-                     footprint.value_field(),
-                     aAction.at( "presentation" ).at( "value" ) ) ) )
+    if( !created.created_items( 0 ).item().UnpackTo( &footprint ) )
     {
-        aError = "KiCad returned a mismatched parsed footprint instance";
+        aError = "KiCad returned an unreadable parsed footprint instance for component "
+                 + aAction.at( "component" ).get<std::string>();
+
+        return false;
+    }
+
+    if( !validateCreatedFootprint( footprint, requested, aAction,
+                                   aFootprintSources[libraryId].get<std::string>(), aError ) )
+    {
+        aError = "component " + aAction.at( "component" ).get<std::string>() + ": "
+                 + ( aError.empty() ? "KiCad returned a mismatched parsed footprint instance"
+                                    : aError );
+
         return false;
     }
 
@@ -6211,8 +6885,10 @@ bool footprintFieldMatches( const kiapi::board::types::Field& aField,
     }
 
     if( aPresentation.contains( "angleDegrees" )
-        && attributes.angle().value_degrees()
-                   != aPresentation.at( "angleDegrees" ).get<double>() )
+        && std::abs( std::remainder(
+                            attributes.angle().value_degrees()
+                                    - aPresentation.at( "angleDegrees" ).get<double>(),
+                            360.0 ) ) > 1e-9 )
     {
         return false;
     }
@@ -6443,6 +7119,7 @@ bool executePcbActions( const KICHAD_IPC_CLIENT& aClient, const KICHAD_IPC_TARGE
 {
     std::vector<const nlohmann::json*> creates;
     std::vector<const nlohmann::json*> footprintCreates;
+    std::vector<const nlohmann::json*> footprintReplacements;
     std::vector<const nlohmann::json*> footprintMetadataUpdates;
     std::vector<const nlohmann::json*> footprintPresentationUpdates;
     std::map<std::pair<std::string, std::string>,
@@ -6457,6 +7134,8 @@ bool executePcbActions( const KICHAD_IPC_CLIENT& aClient, const KICHAD_IPC_TARGE
             creates.emplace_back( &action );
         else if( kind == "create_footprint" )
             footprintCreates.emplace_back( &action );
+        else if( kind == "replace_footprint" )
+            footprintReplacements.emplace_back( &action );
         else if( kind == "update_footprint_metadata" )
             footprintMetadataUpdates.emplace_back( &action );
         else if( kind == "update_footprint_presentation" )
@@ -6469,6 +7148,15 @@ bool executePcbActions( const KICHAD_IPC_CLIENT& aClient, const KICHAD_IPC_TARGE
         else
         {
             aError = "PCB reconcile produced an unsupported executable action";
+            return false;
+        }
+    }
+
+    for( const nlohmann::json* action : footprintReplacements )
+    {
+        if( !createFootprintFromSource( aClient, aTarget, *action,
+                                        aFootprintSources, aError ) )
+        {
             return false;
         }
     }
@@ -6802,6 +7490,14 @@ bool KICHAD::CODEX_TOOLS::InventoryProjectFootprints(
 }
 
 
+bool KICHAD::CODEX_TOOLS::ValidateFootprintModelAssets(
+        const wxString& aProjectPath, const nlohmann::json& aCompilerIr,
+        nlohmann::json& aSummary, std::string& aError )
+{
+    return validateFootprintModelAssets( aProjectPath, aCompilerIr, aSummary, aError );
+}
+
+
 bool KICHAD::CODEX_TOOLS::SchematicScreenUuid(
         const std::string& aSource, std::string& aUuid, std::string& aError )
 {
@@ -6812,7 +7508,25 @@ bool KICHAD::CODEX_TOOLS::SchematicScreenUuid(
 bool KICHAD::CODEX_TOOLS::ValidateNativeSchematicHierarchy(
         const wxFileName& aRootSchematic, std::string& aError )
 {
-    return validateNativeSchematicHierarchy( aRootSchematic, aError );
+    return validateNativeSchematicHierarchy( aRootSchematic, nullptr, nullptr, aError );
+}
+
+
+bool KICHAD::CODEX_TOOLS::ValidateNativeSchematicHierarchy(
+        const wxFileName& aRootSchematic, const nlohmann::json& aCompilerIr,
+        std::string& aError )
+{
+    return validateNativeSchematicHierarchy( aRootSchematic, &aCompilerIr, nullptr,
+                                             aError );
+}
+
+
+bool KICHAD::CODEX_TOOLS::ValidateNativeSchematicHierarchy(
+        const wxFileName& aRootSchematic, const nlohmann::json& aCompilerIr,
+        const nlohmann::json& aResolvedSymbols, std::string& aError )
+{
+    return validateNativeSchematicHierarchy( aRootSchematic, &aCompilerIr,
+                                             &aResolvedSymbols, aError );
 }
 
 
@@ -6985,9 +7699,10 @@ bool KICHAD::CODEX_TOOLS::RunNativeKiCadCheck(
 
 bool KICHAD::CODEX_TOOLS::RunNativeKiCadPreview(
         const std::string& aView, const wxFileName& aInput,
-        const wxFileName& aOutput, int aPage, std::string& aError )
+        const std::vector<int>& aPages, const std::vector<wxFileName>& aOutputs,
+        std::string& aError )
 {
-    return runNativeKiCadPreview( aView, aInput, aOutput, aPage, aError );
+    return runNativeKiCadPreview( aView, aInput, aPages, aOutputs, aError );
 }
 
 
@@ -7014,6 +7729,15 @@ nlohmann::json KICHAD::CODEX_TOOLS::BuildFabricationPlan(
         const nlohmann::json& aIr, const std::string& aFileStem )
 {
     return buildFabricationPlan( aIr, aFileStem );
+}
+
+
+bool KICHAD::CODEX_TOOLS::BuildNativeNetlistValidationPlan(
+        const nlohmann::json& aIr, const nlohmann::json& aResolvedSymbols,
+        const std::string& aFileStem, nlohmann::json& aPlan, std::string& aError )
+{
+    return buildNativeNetlistValidationPlan( aIr, aResolvedSymbols, aFileStem,
+                                             aPlan, aError );
 }
 
 

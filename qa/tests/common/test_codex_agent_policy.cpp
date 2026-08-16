@@ -26,6 +26,8 @@ BOOST_AUTO_TEST_CASE( ExposesOnlyRelevantGenericContext )
     const nlohmann::json config = KICHAD::CODEX_AGENT_POLICY::ThreadConfig();
 
     BOOST_CHECK( config.at( "features.goals" ).get<bool>() );
+    BOOST_CHECK( config.at( "features.default_mode_request_user_input" ).get<bool>() );
+    BOOST_CHECK( config.at( "tools.experimental_request_user_input.enabled" ).get<bool>() );
     BOOST_CHECK_EQUAL( config.at( "web_search" ).get<std::string>(), "live" );
     BOOST_CHECK( !config.at( "include_apps_instructions" ).get<bool>() );
     BOOST_CHECK( !config.at( "include_collaboration_mode_instructions" ).get<bool>() );

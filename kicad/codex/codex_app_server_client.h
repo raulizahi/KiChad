@@ -50,7 +50,7 @@ public:
     int64_t SendRequest( const std::string& aMethod, const JSON& aParams,
                          RESPONSE_HANDLER aHandler = {} );
     bool SendNotification( const std::string& aMethod, const JSON& aParams = JSON::object() );
-    bool SendResponse( const JSON& aId, const JSON& aResult );
+    bool SendResponse( const JSON& aId, const JSON& aResult, bool aSensitive = false );
     bool SendError( const JSON& aId, int aCode, const std::string& aMessage );
 
     void SetMessageHandler( MESSAGE_HANDLER aHandler ) { m_messageHandler = std::move( aHandler ); }
@@ -70,7 +70,7 @@ private:
     static constexpr size_t MAX_WRITE_CHUNK_BYTES = 16 * 1024;
     static constexpr size_t MAX_WRITE_BYTES_PER_POLL = 64 * 1024;
 
-    bool writeMessage( const JSON& aMessage );
+    bool writeMessage( const JSON& aMessage, bool aSensitive = false );
     bool drainOutput();
     void consumeStream( wxInputStream* aStream, std::string& aBuffer, bool aParseJson );
     void dispatchLine( const std::string& aLine );

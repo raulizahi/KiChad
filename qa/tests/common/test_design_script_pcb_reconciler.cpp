@@ -431,7 +431,9 @@ BOOST_FIXTURE_TEST_CASE( CreatesMissingFootprintFromExecutableSchematicInstance,
 
     JSON live = JSON::array( {
             { { "itemId", footprintId }, { "itemType", "footprint" },
-              { "reference", "R1" }, { "schematicLinked", true } }
+              { "reference", "R1" },
+              { "libraryId", "Resistor_SMD:R_0603_1608Metric" },
+              { "schematicLinked", true } }
     } );
     RECONCILER::RESULT repeated =
             RECONCILER::Reconcile( placement, created.nextState, live, Context() );
@@ -466,6 +468,114 @@ BOOST_FIXTURE_TEST_CASE( CreatesMissingFootprintFromExecutableSchematicInstance,
     BOOST_CHECK( !malformed.ok );
     BOOST_CHECK_NE( malformed.diagnostics.dump().find( "invalid_placement" ),
                     std::string::npos );
+}
+
+
+BOOST_FIXTURE_TEST_CASE( ReplacesFootprintWhenTheDesiredLibraryIdentityChanges, FIXTURE )
+{
+    const std::string oldFootprintId = "11111111-1111-8111-8111-111111111111";
+    JSON placement = JSON::array( {
+            { { "action", "place_by_reference" }, { "component", "U1" },
+              { "position", { { "xNm", 10000000 }, { "yNm", 8000000 } } },
+              { "rotationDegrees", 90.0 }, { "side", "front" }, { "locked", false },
+              { "instance",
+                { { "libraryId", "Package_DFN_QFN:WSON-8-1EP_4x4mm_P0.8mm_EP1.98x3mm" },
+                  { "value", "TPS62160" }, { "dnp", false },
+                  { "symbolPath",
+                    JSON::array( { "11111111-1111-8111-8111-111111111111" } ) },
+                  { "symbolSheetName", "Root" },
+                  { "symbolSheetFilename", "board.kicad_sch" },
+                  { "padNets", { { "1", "VIN" }, { "2", "GND" } } } } } }
+    } );
+    JSON oldLive = JSON::array( {
+            { { "itemId", oldFootprintId }, { "itemType", "footprint" },
+              { "reference", "U1" }, { "libraryId", "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm" },
+              { "schematicLinked", true } }
+    } );
+    RECONCILER::RESULT replaced =
+            RECONCILER::Reconcile( placement, nullptr, oldLive, Context() );
+    BOOST_REQUIRE_MESSAGE( replaced.ok, replaced.diagnostics.dump() );
+    BOOST_REQUIRE_EQUAL( replaced.actions.size(), 1 );
+    BOOST_CHECK_EQUAL( replaced.actions[0]["action"].get<std::string>(),
+                       "replace_footprint" );
+    BOOST_CHECK_EQUAL( replaced.actions[0]["replacedItemId"].get<std::string>(),
+                       oldFootprintId );
+    BOOST_CHECK_EQUAL( replaced.counts["footprintReplace"].get<int>(), 1 );
+    BOOST_CHECK_EQUAL( replaced.counts["footprintDelete"].get<int>(), 1 );
+    BOOST_CHECK_EQUAL( replaced.counts["footprintCreate"].get<int>(), 1 );
+    BOOST_REQUIRE_EQUAL( replaced.nextState["managedPcbItems"].size(), 1 );
+    BOOST_CHECK_EQUAL( replaced.nextState["managedPcbItems"][0]["itemId"],
+                       replaced.actions[0]["itemId"] );
+
+    JSON unknownLive = oldLive;
+    unknownLive[0].erase( "libraryId" );
+    RECONCILER::RESULT unknown =
+            RECONCILER::Reconcile( placement, nullptr, unknownLive, Context() );
+    BOOST_CHECK( !unknown.ok );
+    BOOST_CHECK_NE( unknown.diagnostics.dump().find( "unknown_live_footprint_library" ),
+                    std::string::npos );
+}
+
+
+BOOST_FIXTURE_TEST_CASE( ReplacesAChangedFootprintSourceOnceAndPersistsItsRevision, FIXTURE )
+{
+    const std::string firstRevision( 64, 'a' );
+    const std::string secondRevision( 64, 'b' );
+    const std::string managedId =
+            KICHAD::DESIGN_SCRIPT_PCB_PLANNER::StableUuid(
+                    "reconcile_board", "footprint", "U1" );
+    JSON placement = JSON::array( {
+            { { "action", "place_by_reference" }, { "component", "U1" },
+              { "position", { { "xNm", 10000000 }, { "yNm", 8000000 } } },
+              { "rotationDegrees", 90.0 }, { "side", "front" }, { "locked", false },
+              { "instance",
+                { { "libraryId", "Product:REGULATOR" },
+                  { "footprintSourceSha256", firstRevision },
+                  { "value", "TPS62160" }, { "dnp", false },
+                  { "symbolPath",
+                    JSON::array( { "11111111-1111-8111-8111-111111111111" } ) },
+                  { "symbolSheetName", "Root" },
+                  { "symbolSheetFilename", "board.kicad_sch" },
+                  { "padNets", { { "1", "VIN" }, { "2", "GND" } } } } } }
+    } );
+
+    RECONCILER::RESULT created =
+            RECONCILER::Reconcile( placement, nullptr, JSON::array(), Context() );
+    BOOST_REQUIRE_MESSAGE( created.ok, created.diagnostics.dump() );
+    BOOST_REQUIRE_EQUAL( created.actions.size(), 1 );
+    BOOST_CHECK_EQUAL( created.actions[0]["action"].get<std::string>(),
+                       "create_footprint" );
+    BOOST_REQUIRE_EQUAL( created.nextState["managedPcbItems"].size(), 1 );
+    BOOST_CHECK_EQUAL(
+            created.nextState["managedPcbItems"][0]["footprintSourceSha256"],
+            firstRevision );
+
+    JSON live = JSON::array( {
+            { { "itemId", managedId }, { "itemType", "footprint" },
+              { "reference", "U1" }, { "libraryId", "Product:REGULATOR" },
+              { "schematicLinked", true } }
+    } );
+    RECONCILER::RESULT unchanged = RECONCILER::Reconcile(
+            placement, created.nextState, live, Context() );
+    BOOST_REQUIRE_MESSAGE( unchanged.ok, unchanged.diagnostics.dump() );
+    BOOST_CHECK_EQUAL( unchanged.counts["footprintReplace"].get<int>(), 0 );
+    BOOST_CHECK_EQUAL(
+            unchanged.nextState["managedPcbItems"][0]["footprintSourceSha256"],
+            firstRevision );
+
+    placement[0]["instance"]["footprintSourceSha256"] = secondRevision;
+    RECONCILER::RESULT changed = RECONCILER::Reconcile(
+            placement, unchanged.nextState, live, Context() );
+    BOOST_REQUIRE_MESSAGE( changed.ok, changed.diagnostics.dump() );
+    BOOST_REQUIRE_EQUAL( changed.actions.size(), 1 );
+    BOOST_CHECK_EQUAL( changed.actions[0]["action"].get<std::string>(),
+                       "replace_footprint" );
+    BOOST_CHECK_EQUAL( changed.actions[0]["replacedItemId"].get<std::string>(),
+                       managedId );
+    BOOST_CHECK_EQUAL( changed.counts["footprintReplace"].get<int>(), 1 );
+    BOOST_CHECK_EQUAL(
+            changed.nextState["managedPcbItems"][0]["footprintSourceSha256"],
+            secondRevision );
 }
 
 

@@ -12,6 +12,8 @@
 #include "codex_panel.h"
 
 #include "codex_agent_policy.h"
+#include "codex_tool_internal.h"
+#include "codex_user_input_dialog.h"
 
 #include <bitmaps.h>
 #include <build_version.h>
@@ -176,7 +178,14 @@ CODEX_PANEL::CODEX_PANEL( wxWindow* aParent, std::function<wxString()> aProjectP
         m_preferenceSaver( std::move( aPreferenceSaver ) ),
         m_applicationOpener( std::move( aApplicationOpener ) ),
         m_toolRegistry( m_projectPathProvider,
-                        [this]() { return !m_turnSnapshotHash.IsEmpty(); } ),
+                        [this]() { return !m_turnSnapshotHash.IsEmpty(); },
+                        {},
+                        []( const wxFileName& aRoot, const JSON& aCompilerIr,
+                            const JSON& aResolvedSymbols, std::string& aError )
+                        {
+                            return KICHAD::CODEX_TOOLS::ValidateNativeSchematicHierarchy(
+                                    aRoot, aCompilerIr, aResolvedSymbols, aError );
+                        } ),
         m_status( nullptr ),
         m_processStatus( nullptr ),
         m_loginButton( nullptr ),
@@ -191,11 +200,13 @@ CODEX_PANEL::CODEX_PANEL( wxWindow* aParent, std::function<wxString()> aProjectP
         m_stopButton( nullptr ),
         m_revertButton( nullptr ),
         m_newConversationButton( nullptr ),
+        m_userInputDialog( nullptr ),
         m_externalLayoutMode( false ),
         m_preferredModel( std::move( aPreferredModel ) ),
         m_preferredReasoningEffort( std::move( aPreferredReasoningEffort ) ),
         m_shuttingDown( false ),
         m_nextToolTaskId( 1 ),
+        m_nextSteerMessageId( 1 ),
         m_initialized( false ),
         m_authenticated( false ),
         m_conversationLoaded( false ),
@@ -228,9 +239,9 @@ CODEX_PANEL::CODEX_PANEL( wxWindow* aParent, std::function<wxString()> aProjectP
     m_revertButton->SetToolTip( _( "Restore the project to before the last Codex turn" ) );
     m_revertButton->SetName( _( "Undo Codex changes" ) );
     m_revertButton->Disable();
-    m_newConversationButton = new wxButton( this, wxID_ANY, wxEmptyString, wxDefaultPosition,
+    m_newConversationButton = new wxButton( this, wxID_ANY, wxS( "+" ), wxDefaultPosition,
                                             wxDefaultSize, wxBU_EXACTFIT );
-    m_newConversationButton->SetBitmap( KiBitmapBundle( BITMAPS::new_document ) );
+    m_newConversationButton->SetMinSize( wxSize( FromDIP( 28 ), FromDIP( 28 ) ) );
     m_newConversationButton->SetToolTip( _( "Start a new Codex conversation" ) );
     m_newConversationButton->SetName( _( "New conversation" ) );
     m_newConversationButton->Disable();
@@ -314,6 +325,8 @@ CODEX_PANEL::CODEX_PANEL( wxWindow* aParent, std::function<wxString()> aProjectP
 CODEX_PANEL::~CODEX_PANEL()
 {
     m_shuttingDown.store( true );
+    clearUserInputRequests();
+    m_pendingSteers.clear();
     m_client.SetMessageHandler( {} );
     m_client.SetStateHandler( {} );
 
@@ -805,7 +818,7 @@ void CODEX_PANEL::startTurn( const std::string& aMessage )
 
     m_conversationHistory.push_back( { "user", aMessage } );
     beginTurnDisplay();
-    m_client.SendRequest(
+    const int64_t requestId = m_client.SendRequest(
             "turn/start", params,
             [this, aMessage]( const JSON& aResponse )
             {
@@ -827,10 +840,303 @@ void CODEX_PANEL::startTurn( const std::string& aMessage )
                     appendTranscript( wxS( "[" )
                                       + responseErrorMessage(
                                                 aResponse, _( "Codex turn failed to start." ) )
-                                      + wxS( "]\n" ) );
+                                      + _( " The message was restored.]\n" ) );
+                    restoreInputMessage( wxString::FromUTF8( aMessage ) );
                     setBusy( false );
                 }
             } );
+
+    if( requestId == 0 )
+    {
+        if( !m_conversationHistory.empty() && m_conversationHistory.back().role == "user"
+            && m_conversationHistory.back().text == aMessage )
+        {
+            m_conversationHistory.pop_back();
+        }
+
+        restoreInputMessage( wxString::FromUTF8( aMessage ) );
+        appendTranscript( _( "[Codex turn could not be sent. The message was restored.]\n" ) );
+        setBusy( false );
+    }
+}
+
+
+void CODEX_PANEL::steerTurn( const wxString& aMessage )
+{
+    if( m_threadId.empty() || m_turnId.empty() )
+    {
+        restoreInputMessage( aMessage );
+        setStatus( _( "The active Codex turn ended before steering could be sent." ) );
+        return;
+    }
+
+    const uint64_t messageId = m_nextSteerMessageId++;
+    const std::string expectedTurnId = m_turnId;
+    const std::string clientMessageId = "kichad-steer-" + std::to_string( messageId );
+    const std::string utf8Message( aMessage.ToUTF8() );
+    JSON params = {
+        { "threadId", m_threadId },
+        { "expectedTurnId", expectedTurnId },
+        { "clientUserMessageId", clientMessageId },
+        { "input", JSON::array( { { { "type", "text" }, { "text", utf8Message },
+                                     { "text_elements", JSON::array() } } } ) }
+    };
+
+    m_pendingSteers.emplace( messageId, PENDING_STEER{ expectedTurnId, aMessage } );
+    const int64_t requestId = m_client.SendRequest(
+            "turn/steer", params,
+            [this, messageId]( const JSON& aResponse )
+            {
+                auto pending = m_pendingSteers.find( messageId );
+
+                if( pending == m_pendingSteers.end() )
+                    return;
+
+                const PENDING_STEER steer = pending->second;
+                m_pendingSteers.erase( pending );
+                const bool accepted = aResponse.contains( "result" )
+                                      && aResponse["result"].value( "turnId", "" )
+                                                 == steer.expectedTurnId;
+
+                if( accepted )
+                {
+                    const std::string text( steer.message.ToUTF8() );
+                    appendTranscript( wxString::Format( _( "\nYou (steering): %s\n" ),
+                                                        steer.message ) );
+                    m_conversationHistory.push_back( { "user", text } );
+                    persistConversation();
+                    setStatus( m_turnId.empty() ? _( "Steering was delivered." )
+                                                : _( "Steering delivered; Codex is continuing..." ) );
+                }
+                else
+                {
+                    const wxString error = responseErrorMessage(
+                            aResponse, _( "The active turn could not accept steering." ) );
+                    restoreInputMessage( steer.message );
+                    appendTranscript( wxString::Format(
+                            _( "\n[Steering was not delivered: %s The message was restored.]\n" ),
+                            error ) );
+                    setStatus( error );
+                }
+
+                setBusy( !m_turnId.empty() );
+            } );
+
+    if( requestId == 0 )
+    {
+        m_pendingSteers.erase( messageId );
+        restoreInputMessage( aMessage );
+        appendTranscript( _( "\n[Steering could not be sent. The message was restored.]\n" ) );
+        setStatus( _( "Steering could not be sent." ) );
+        setBusy( !m_turnId.empty() );
+        return;
+    }
+
+    setStatus( _( "Steering the active Codex turn..." ) );
+    setBusy( true );
+}
+
+
+void CODEX_PANEL::restoreInputMessage( const wxString& aMessage )
+{
+    if( aMessage.IsEmpty() )
+        return;
+
+    const wxString current = m_input->GetValue();
+    m_input->ChangeValue( current.IsEmpty() ? aMessage : aMessage + wxS( "\n" ) + current );
+    m_input->SetInsertionPointEnd();
+}
+
+
+void CODEX_PANEL::failPendingSteers( const wxString& aReason )
+{
+    if( m_pendingSteers.empty() )
+        return;
+
+    for( auto pending = m_pendingSteers.rbegin(); pending != m_pendingSteers.rend(); ++pending )
+        restoreInputMessage( pending->second.message );
+
+    appendTranscript( wxString::Format(
+            _( "\n[%zu steering message(s) were not delivered: %s The messages were restored.]\n" ),
+            m_pendingSteers.size(), aReason ) );
+    m_pendingSteers.clear();
+}
+
+
+void CODEX_PANEL::handleUserInputRequest( const JSON& aMessage )
+{
+    if( !aMessage.contains( "id" ) )
+        return;
+
+    const JSON& params = aMessage.value( "params", JSON::object() );
+    wxString error;
+
+    if( !CODEX_USER_INPUT_DIALOG::ValidateRequest( params, error ) )
+    {
+        m_client.SendError( aMessage["id"], -32602, std::string( error.ToUTF8() ) );
+        appendTranscript( wxString::Format( _( "\n[Codex question rejected: %s]\n" ), error ) );
+        return;
+    }
+
+    const std::string requestThreadId = params.value( "threadId", "" );
+    const std::string requestTurnId = params.value( "turnId", "" );
+
+    if( requestThreadId != m_threadId
+        || ( !m_turnId.empty() && requestTurnId != m_turnId ) )
+    {
+        m_client.SendError( aMessage["id"], -32602,
+                            "Codex user-input request does not belong to the active turn" );
+        appendTranscript( _( "\n[Ignored a Codex question for a different turn.]\n" ) );
+        return;
+    }
+
+    // A request can race the turn/started notification on a fast local app-server.  The request
+    // carries the same authoritative turn id, so adopting it here prevents a false idle state.
+    if( m_turnId.empty() )
+    {
+        m_turnId = requestTurnId;
+        setBusy( true );
+    }
+
+    m_pendingUserInputRequests.push_back( { aMessage["id"], params } );
+    appendTranscript( wxString::Format(
+            _( "\n[Codex is waiting for your answer%s.]\n" ),
+            m_pendingUserInputRequests.size() > 1 ? _( "; another question is queued" )
+                                                   : wxString() ) );
+    showNextUserInputRequest();
+}
+
+
+void CODEX_PANEL::showNextUserInputRequest()
+{
+    if( m_userInputDialog || m_pendingUserInputRequests.empty() || m_shuttingDown.load() )
+        return;
+
+    const PENDING_USER_INPUT_REQUEST& request = m_pendingUserInputRequests.front();
+    const JSON requestId = request.requestId;
+    m_userInputDialog = new CODEX_USER_INPUT_DIALOG(
+            this, request.params,
+            [this, requestId]( const JSON& aResponse, const std::string& aPersistedText,
+                               const wxString& aTranscript, bool aSensitive )
+            {
+                return submitUserInputResponse( requestId, aResponse, aPersistedText,
+                                                aTranscript, aSensitive );
+            },
+            [this, requestId]() { return stopForUserInput( requestId ); } );
+    m_userInputDialog->Show();
+    m_userInputDialog->Raise();
+    setStatus( _( "Codex is waiting for your input." ) );
+    setBusy( true );
+}
+
+
+bool CODEX_PANEL::submitUserInputResponse( const JSON& aRequestId, const JSON& aResponse,
+                                           const std::string& aPersistedText,
+                                           const wxString& aTranscript, bool aSensitive )
+{
+    if( m_pendingUserInputRequests.empty()
+        || m_pendingUserInputRequests.front().requestId != aRequestId )
+    {
+        return false;
+    }
+
+    if( !m_client.SendResponse( aRequestId, aResponse, aSensitive ) )
+        return false;
+
+    appendTranscript( aTranscript );
+
+    if( !aPersistedText.empty() )
+    {
+        m_conversationHistory.push_back( { "user", aPersistedText } );
+        persistConversation();
+    }
+
+    setStatus( _( "Answer delivered; Codex is continuing..." ) );
+    // Dismiss the modeless dialog only after its submit callback unwinds.  Destroying the
+    // dialog would otherwise clear the std::function that is currently executing.
+    CallAfter( [this, aRequestId]() { resolveUserInputRequest( aRequestId ); } );
+    return true;
+}
+
+
+bool CODEX_PANEL::stopForUserInput( const JSON& aRequestId )
+{
+    if( m_pendingUserInputRequests.empty()
+        || m_pendingUserInputRequests.front().requestId != aRequestId )
+    {
+        return false;
+    }
+
+    const JSON& params = m_pendingUserInputRequests.front().params;
+    const std::string threadId = params.value( "threadId", "" );
+    const std::string turnId = params.value( "turnId", "" );
+
+    if( threadId.empty() || turnId.empty() )
+        return false;
+
+    const int64_t requestId = m_client.SendRequest(
+            "turn/interrupt", { { "threadId", threadId }, { "turnId", turnId } },
+            [this, aRequestId]( const JSON& aResponse )
+            {
+                if( aResponse.contains( "result" ) )
+                    return;
+
+                if( m_userInputDialog && !m_pendingUserInputRequests.empty()
+                    && m_pendingUserInputRequests.front().requestId == aRequestId )
+                {
+                    const wxString error = responseErrorMessage(
+                            aResponse, _( "The Codex turn could not be stopped." ) );
+                    m_userInputDialog->SetStopping( false, error );
+                    setStatus( error );
+                }
+            } );
+
+    if( requestId == 0 )
+        return false;
+
+    setStatus( _( "Stopping Codex turn..." ) );
+    return true;
+}
+
+
+void CODEX_PANEL::resolveUserInputRequest( const JSON& aRequestId )
+{
+    auto request = std::find_if(
+            m_pendingUserInputRequests.begin(), m_pendingUserInputRequests.end(),
+            [&aRequestId]( const PENDING_USER_INPUT_REQUEST& aPending )
+            {
+                return aPending.requestId == aRequestId;
+            } );
+
+    if( request == m_pendingUserInputRequests.end() )
+        return;
+
+    const bool current = request == m_pendingUserInputRequests.begin();
+
+    if( current && m_userInputDialog )
+    {
+        CODEX_USER_INPUT_DIALOG* dialog = m_userInputDialog;
+        m_userInputDialog = nullptr;
+        dialog->Dismiss();
+    }
+
+    m_pendingUserInputRequests.erase( request );
+
+    if( current )
+        showNextUserInputRequest();
+}
+
+
+void CODEX_PANEL::clearUserInputRequests()
+{
+    if( m_userInputDialog )
+    {
+        CODEX_USER_INPUT_DIALOG* dialog = m_userInputDialog;
+        m_userInputDialog = nullptr;
+        dialog->Dismiss();
+    }
+
+    m_pendingUserInputRequests.clear();
 }
 
 
@@ -1131,12 +1437,20 @@ void CODEX_PANEL::setBusy( bool aBusy )
     // /goal clear without first interrupting the current goal turn.
     m_sendButton->Enable( m_initialized && m_authenticated
                           && ( m_conversationLoaded || !m_savedThreadId.empty() )
-                          && !m_threadPreparing );
+                          && !m_threadPreparing && m_pendingSteers.empty() );
     m_newConversationButton->Enable( !aBusy && m_initialized && !m_threadPreparing );
     m_stopButton->Enable( aBusy && !m_threadPreparing );
     m_revertButton->Enable( !aBusy && !m_threadPreparing
                             && !m_turnSnapshotHash.IsEmpty() );
     m_input->Enable( !m_threadPreparing );
+    m_sendButton->SetLabel( !m_turnId.empty() && m_pendingUserInputRequests.empty()
+                                    ? _( "Steer" )
+                                    : _( "Send" ) );
+
+    if( !m_turnId.empty() && m_pendingUserInputRequests.empty() )
+        m_input->SetHint( _( "Steer the active Codex turn..." ) );
+    else
+        m_input->SetHint( _( "Describe the board you want Codex to design..." ) );
 }
 
 
@@ -1237,6 +1551,14 @@ void CODEX_PANEL::selectProjectThread()
     if( activePath == m_threadProjectPath )
         return;
 
+    if( !m_threadId.empty() && !m_turnId.empty() )
+    {
+        m_client.SendRequest( "turn/interrupt",
+                              { { "threadId", m_threadId }, { "turnId", m_turnId } } );
+    }
+
+    failPendingSteers( _( "The active project changed." ) );
+    clearUserInputRequests();
     m_threadProjectPath = activePath;
     CODEX_THREAD_STORE::BINDING binding = m_threadStore.Load( activePath );
     m_savedThreadId = std::move( binding.threadId );
@@ -1425,6 +1747,13 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
             m_agentResponseOpen = false;
         }
     }
+    else if( method == "serverRequest/resolved" )
+    {
+        const JSON& params = aMessage.value( "params", JSON::object() );
+
+        if( params.value( "threadId", "" ) == m_threadId && params.contains( "requestId" ) )
+            resolveUserInputRequest( params["requestId"] );
+    }
     else if( method == "thread/status/changed" )
     {
         const JSON& status = aMessage["params"].value( "status", JSON::object() );
@@ -1464,6 +1793,8 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
     else if( method == "turn/completed" )
     {
         finishReasoningDisplay();
+        failPendingSteers( _( "The Codex turn ended before app-server accepted them." ) );
+        clearUserInputRequests();
 
         if( m_agentResponseOpen )
             appendTranscript( wxS( "\n" ) );
@@ -1522,6 +1853,10 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
             appendTranscript( wxString::Format( _( "\n[Codex error: %s]\n" ), error ) );
         setStatus( willRetry ? wxString::Format( _( "Codex error; retrying: %s" ), error )
                              : wxString::Format( _( "Codex error: %s" ), error ) );
+    }
+    else if( method == "item/tool/requestUserInput" && aMessage.contains( "id" ) )
+    {
+        handleUserInputRequest( aMessage );
     }
     else if( method == "item/tool/call" && aMessage.contains( "id" ) )
     {
@@ -1830,6 +2165,8 @@ void CODEX_PANEL::onAppServerState( bool aRunning, const wxString& aDetail )
     if( !aRunning )
     {
         finishReasoningDisplay();
+        failPendingSteers( _( "The Codex service became unavailable." ) );
+        clearUserInputRequests();
 
         if( m_agentResponseOpen )
             appendTranscript( wxS( "\n" ) );
@@ -1980,6 +2317,21 @@ void CODEX_PANEL::onSend( wxCommandEvent& aEvent )
     if( message.IsEmpty() )
         return;
 
+    // An unanswered app-server question owns the input focus: route the user back to the
+    // dialog instead of queuing a message the running turn cannot see.
+    if( !m_pendingUserInputRequests.empty() )
+    {
+        setStatus( _( "Answer the Codex question before sending another message." ) );
+
+        if( m_userInputDialog )
+        {
+            m_userInputDialog->Show();
+            m_userInputDialog->Raise();
+        }
+
+        return;
+    }
+
     m_input->Clear();
     submitUserMessage( message );
 }
@@ -1994,10 +2346,10 @@ bool CODEX_PANEL::submitUserMessage( const wxString& aMessage )
     if( handleGoalCommand( message ) )
         return false;
 
+    // Steer the running turn rather than refusing the message outright.
     if( !m_turnId.empty() )
     {
-        appendTranscript( _( "[Codex is still working. Use /goal pause, /goal clear, or Stop "
-                             "before starting another request.]\n" ) );
+        steerTurn( message );
         return false;
     }
 
@@ -2029,6 +2381,16 @@ void CODEX_PANEL::onStop( wxCommandEvent& aEvent )
 {
     if( m_threadId.empty() || m_turnId.empty() )
         return;
+
+    if( !m_pendingUserInputRequests.empty() )
+    {
+        const JSON requestId = m_pendingUserInputRequests.front().requestId;
+
+        if( stopForUserInput( requestId ) && m_userInputDialog )
+            m_userInputDialog->SetStopping( true );
+
+        return;
+    }
 
     m_client.SendRequest( "turn/interrupt", { { "threadId", m_threadId }, { "turnId", m_turnId } } );
     setStatus( _( "Stopping Codex turn..." ) );
@@ -2079,6 +2441,8 @@ void CODEX_PANEL::onNewConversation( wxCommandEvent& aEvent )
             m_threadId.empty() ? m_savedThreadId : m_threadId;
     m_threadId.clear();
     m_savedThreadId.clear();
+    clearUserInputRequests();
+    m_pendingSteers.clear();
     m_conversationHistory.clear();
     m_currentAgentMessage.clear();
     m_turnId.clear();

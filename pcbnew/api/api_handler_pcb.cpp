@@ -3323,10 +3323,14 @@ HANDLER_RESULT<CreateItemsResponse> API_HANDLER_PCB::handleParseAndCreateItemsFr
                                            footprint->GetTransientComponentClassNames() );
     footprint->ClearTransientComponentClassNames();
     std::string requestedId;
+    std::optional<board::types::FootprintInstance> requestedMetadata;
+    std::map<wxString, wxString> padNets;
+    std::map<wxString, wxString> footprintFields;
 
     if( aCtx.Request.has_item() )
     {
-        board::types::FootprintInstance requested;
+        requestedMetadata.emplace();
+        board::types::FootprintInstance& requested = *requestedMetadata;
 
         if( !aCtx.Request.item().UnpackTo( &requested )
             || ( !requested.id().value().empty()
@@ -3383,9 +3387,6 @@ HANDLER_RESULT<CreateItemsResponse> API_HANDLER_PCB::handleParseAndCreateItemsFr
                 return tl::unexpected( error );
             }
         }
-
-        std::map<wxString, wxString> padNets;
-        std::map<wxString, wxString> footprintFields;
 
         for( const google::protobuf::Any& packed : requested.definition().items() )
         {
@@ -3468,6 +3469,10 @@ HANDLER_RESULT<CreateItemsResponse> API_HANDLER_PCB::handleParseAndCreateItemsFr
                 wxString::FromUTF8( requested.reference_field().text().text().text() ) );
         footprint->SetValue(
                 wxString::FromUTF8( requested.value_field().text().text().text() ) );
+        footprint->GetField( FIELD_T::DATASHEET )->SetText(
+                wxString::FromUTF8( requested.datasheet_field().text().text().text() ) );
+        footprint->GetField( FIELD_T::DESCRIPTION )->SetText(
+                wxString::FromUTF8( requested.description_field().text().text().text() ) );
         footprint->SetBoardOnly( false );
         footprint->SetDNP( requested.attributes().do_not_populate() );
         footprint->SetPath( kiapi::common::UnpackSheetPath( requested.symbol_path() ) );
@@ -3557,6 +3562,109 @@ HANDLER_RESULT<CreateItemsResponse> API_HANDLER_PCB::handleParseAndCreateItemsFr
     const_cast<KIID&>( footprint->m_Uuid ) = requestedId.empty()
                                                    ? KIID()
                                                    : KIID( requestedId );
+
+    if( aCtx.Request.has_replace_item_id() )
+    {
+        const std::string replacedId = aCtx.Request.replace_item_id().value();
+
+        if( !requestedMetadata || replacedId.empty()
+            || !KIID::SniffTest( wxString::FromUTF8( replacedId ) )
+            || requestedId.empty() )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message(
+                    "atomic footprint replacement requires valid existing and replacement UUIDs" );
+            return tl::unexpected( error );
+        }
+
+        std::optional<BOARD_ITEM*> existingItem = getItemById( KIID( replacedId ) );
+
+        if( !existingItem )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message(
+                    fmt::format( "the footprint selected for replacement, {}, does not exist",
+                                 replacedId ) );
+            return tl::unexpected( error );
+        }
+
+        if( ( *existingItem )->Type() != PCB_FOOTPRINT_T )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message(
+                    "the item selected for atomic footprint replacement is not a footprint" );
+            return tl::unexpected( error );
+        }
+
+        if( requestedId != replacedId && getItemById( KIID( requestedId ) ) )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message(
+                    fmt::format( "replacement footprint UUID {} is already in use", requestedId ) );
+            return tl::unexpected( error );
+        }
+
+        footprint->FixUpPadsForBoard( board );
+        FOOTPRINT* replacement = static_cast<FOOTPRINT*>( parsed.release() );
+        BOARD_COMMIT* commit =
+                static_cast<BOARD_COMMIT*>( getCurrentCommit( aCtx.ClientName ) );
+        frame()->ExchangeFootprint( static_cast<FOOTPRINT*>( *existingItem ), replacement,
+                                    *commit, true, true, true, true, true, true, true, true,
+                                    requestedId == replacedId );
+
+        // ExchangeFootprint intentionally preserves ordinary interactive-instance state.  KDS is
+        // an authoritative replacement, so restore the validated requested instance metadata and
+        // pad-net mapping after the geometry/child reconciliation and before readback.
+        const board::types::FootprintInstance& requested = *requestedMetadata;
+        replacement->SetReference(
+                wxString::FromUTF8( requested.reference_field().text().text().text() ) );
+        replacement->SetValue(
+                wxString::FromUTF8( requested.value_field().text().text().text() ) );
+        replacement->GetField( FIELD_T::DATASHEET )->SetText(
+                wxString::FromUTF8( requested.datasheet_field().text().text().text() ) );
+        replacement->GetField( FIELD_T::DESCRIPTION )->SetText(
+                wxString::FromUTF8( requested.description_field().text().text().text() ) );
+        replacement->SetBoardOnly( false );
+        replacement->SetDNP( requested.attributes().do_not_populate() );
+        replacement->SetPath( kiapi::common::UnpackSheetPath( requested.symbol_path() ) );
+        replacement->SetSheetname( wxString::FromUTF8( requested.symbol_sheet_name() ) );
+        replacement->SetSheetfile( wxString::FromUTF8( requested.symbol_sheet_filename() ) );
+        replacement->SetLayerAndFlip(
+                FromProtoEnum<PCB_LAYER_ID, board::types::BoardLayer>( requested.layer() ) );
+        replacement->SetPosition( VECTOR2I( requested.position().x_nm(),
+                                             requested.position().y_nm() ) );
+        replacement->SetOrientationDegrees( requested.orientation().value_degrees() );
+        replacement->SetLocked(
+                requested.locked() == common::types::LockedState::LS_LOCKED );
+
+        for( PAD* pad : replacement->Pads() )
+        {
+            auto net = padNets.find( pad->GetNumber() );
+
+            if( net == padNets.end() )
+                continue;
+
+            board::types::Net netMessage;
+            netMessage.set_name( net->second.ToUTF8() );
+            pad->UnpackNet( netMessage );
+        }
+
+        CreateItemsResponse response;
+        response.mutable_header()->mutable_document()->CopyFrom( aCtx.Request.document() );
+        response.set_status( ItemRequestStatus::IRS_OK );
+        ItemCreationResult* result = response.add_created_items();
+        result->mutable_status()->set_code( ItemStatusCode::ISC_OK );
+        replacement->Serialize( *result->mutable_item() );
+
+        if( !m_activeClients.count( aCtx.ClientName ) )
+            pushCurrentCommit( aCtx.ClientName, _( "Replaced footprint via API" ) );
+
+        return response;
+    }
 
     google::protobuf::RepeatedPtrField<google::protobuf::Any> items;
     footprint->Serialize( *items.Add() );

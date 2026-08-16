@@ -1728,6 +1728,19 @@ BOOST_AUTO_TEST_CASE( CompilesOneExplicitMultiUnitComponentAndEndpointRepresenta
     BOOST_REQUIRE_EQUAL( result.ir["schematic"]["busAliases"].size(), 1 );
     BOOST_CHECK_EQUAL( result.ir["schematic"]["busAliases"][0]["members"][0], "SIGNAL" );
     BOOST_CHECK_EQUAL( result.plan["counts"]["noConnects"].get<int>(), 1 );
+    BOOST_CHECK_EQUAL( result.ir["schematic"]["nets"][0]["presentation"], "auto" );
+
+    std::string labeledHierarchy = source;
+    const std::string automaticNet = "(net SIGNAL ";
+    const size_t netAt = labeledHierarchy.find( automaticNet );
+    BOOST_REQUIRE_NE( netAt, std::string::npos );
+    labeledHierarchy.replace( netAt, automaticNet.size(),
+                              "(net SIGNAL (presentation labels) " );
+    result = KICHAD::DESIGN_SCRIPT_COMPILER::Compile( labeledHierarchy );
+    BOOST_REQUIRE_MESSAGE( result.ok, result.diagnostics.dump() );
+    BOOST_CHECK_NE( result.diagnostics.dump().find(
+                            "cross_sheet_global_label_presentation" ),
+                    std::string::npos );
 
     const std::string invalid = R"KDS((kichad_design
   (version 1) (project invalid_units)

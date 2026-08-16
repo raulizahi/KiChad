@@ -53,7 +53,19 @@ exist.
   application flow. Tool execution stays off the wxWidgets UI thread and reports progress rather
   than exposing process IDs.
 - `inspect.render` attaches bounded schematic, PCB production, PCB assembly/layout, and 3D views to
-  the model so it can visually review generated work.
+  the model directly so it can visually review generated work without reopening a cache path
+  through another tool. A schematic render without `page` attaches
+  a hierarchy overview whose root-level sheet boxes contain scaled child-sheet previews, plus a
+  bounded set of referenced subsheets separately in one native export, with page, sheet, instance,
+  source-file, bounds, total-count, and truncation metadata. An explicit page can inspect any
+  remaining sheet. Preview identity includes every hierarchy file, preventing a changed child page
+  from reusing a stale image.
+- `design.preview` and `design.apply` privately stage the complete generated hierarchy and require
+  a native KiCad netlist with the exact compiled KDS component-pin membership and net names.
+  Export eligibility comes from the exact resolved symbol metadata: `on_board no` symbols and
+  their endpoints are excluded only from the PCB-oriented netlist comparison and remain subject to
+  native ERC. Multi-unit placements compare as one distinct component reference. Apply validates
+  again after installation and rolls back on any mismatch.
 - The Ubuntu 24.04 AppImage includes the complete checksum-pinned Codex standalone package and
   runtime helpers. KiChad prefers that sibling executable, so end users do not install Codex or
   Node separately; credentials and durable user state remain outside the immutable image.
@@ -91,11 +103,17 @@ The implemented source/compiler foundation includes:
 - project metadata, title blocks, text variables, field templates, nested schematic hierarchy,
   project/global library dependencies, and current KiCad 10 library tables;
 - project components, multi-unit and power/virtual symbols, fields, pin-resolved nets,
-  no-connects, local/global/hierarchical labels, reviewable orthogonal wires, buses, entries,
+  no-connects, automatic same-page wires and cross-page hierarchy interfaces,
+  local/global/hierarchical labels, reviewable orthogonal wires, buses, entries,
   aliases, junctions, directives, rule areas, graphics, text, images, tables, and groups;
 - KDS-owned project symbols with units, De Morgan styles, graphics, fields, filters, and typed pins;
-- KDS-owned project footprints with standard and custom pads, padstacks, graphics, text, groups,
-  zones, keepouts, variants, properties, and project-local 3D-model assignments;
+- KDS-owned project footprints with standard, custom, and numberless stencil-aperture pads,
+  padstacks, graphics, text, groups, zones, keepouts, variants, properties, and project-local or
+  installed-stock KiCad 10 3D-model assignments;
+- pre-mutation existence/confinement checks for authored project and installed-stock 3D models,
+  native-loader validation of generated aperture pads, and source-digest-aware transactional
+  footprint creation plus native atomic footprint exchange with exact response readback and
+  rollback;
 - installed KiCad stock symbol and footprint resolution without component-specific hardcoding;
 - stackup, complete global board constraints, net classes, all native conditional-rule constraint
   types, arbitrary explicit outline geometry, exact placement, routes/arcs, vias, zones, keepouts,

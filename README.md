@@ -69,17 +69,27 @@ are documented in [docs/kichad-codex-architecture.md](docs/kichad-codex-architec
 submitted turn first snapshots the project through KiCad's local-history system, and the panel can
 restore that complete pre-turn state.  The initial native `project` and `inspect` calls expose
 project context and bounded, read-only KiCad 10 design inspection without shell or GUI automation.
-`inspect.render` uses the matching native KiCad backend to attach a cropped schematic, production
-PCB (`pcb2d`), assembly/layout PCB (`pcblayout`, including Fab fields and courtyards), or 3D board
-PNG directly to the Codex tool result, so the model can review actual generated documents
+`inspect.render` uses the matching native KiCad backend to attach cropped schematic pages, a
+production PCB (`pcb2d`), assembly/layout PCB (`pcblayout`, including Fab fields and courtyards),
+or 3D board PNG directly to the Codex tool result, so the model can review actual generated documents
 while iterating; these images are derived previews under `.kichad/previews/`, not another design
-representation. KDS `place` declarations can independently control each footprint Reference and
+representation. Schematic preview revisions hash the complete referenced hierarchy, so changing a
+child sheet cannot reuse a stale image. Omitting `page` renders a hierarchy overview with each
+root-level sheet box populated by a scaled preview of that child, plus up to 24 referenced
+subsheets as separate full-size model-visible images in one native export; the response reports
+truncation, and an explicit page renders any one page. Superseded images for the same view are removed after a successful render. KDS
+`place` declarations can independently control each footprint Reference and
 Value field's visibility, absolute position, presentation layer, size, stroke, angle,
 justification, and font styling. The Ubuntu bootstrap installs Poppler for the bounded PDF-to-PNG
 stage. The
 `design` call returns bounded paged semantic context, reads exact source, compiles, previews,
 atomically saves, and transactionally
-applies reusable `.kicad_kds` project sidecars, and the `pcb` call exposes the exact protobuf field
+applies reusable `.kicad_kds` project sidecars. Preview and apply both stage the generated schematic
+hierarchy privately and require KiCad's native netlist to match every compiled KDS net name and pin
+before reporting successful lowering; the comparison uses each resolved symbol's native
+`on_board` eligibility so schematic-only power and ERC symbols remain covered by ERC without being
+mistaken for missing PCB-netlist components. Apply repeats that check against the installed files. The
+`pcb` call exposes the exact protobuf field
 schema and connects directly to the open PCB Editor through KiCad 10's protobuf IPC API for bounded
 live reads and snapshot-gated, native undoable transactions. A successful `design.apply` saves the
 live board but explicitly reports verification as `not_run`; Codex must render the affected views
@@ -254,9 +264,13 @@ top/bottom backdrilling, complete per-pad teardrop geometry and policy, tenting,
 fixed and curved artwork, polygons and fills, rich text and text boxes, local
 pad and footprint-wide mask/paste/clearance/thermal policy, custom copper stacks, private layers,
 stable-ID displayable metadata properties, native component-class membership, jumper/net-tie groups, footprint-local copper zones and
-keepouts, nested stable-ID item groups, explicit assembly variants, and project-local 3D model transforms;
+keepouts, nested stable-ID item groups, explicit assembly variants, and project-local or installed
+KiCad 10 stock 3D model transforms, including numberless side-specific stencil-aperture pads;
 the current KiCad 10 `.kicad_mod` artifacts are whole-library swapped, native-loader
-validated, journaled, and restored exactly after an injected rejection. Board vias also carry
+validated, journaled, and restored exactly after an injected rejection. Project and installed-stock
+model assets are resolved and confined before mutation, while live footprint instances retain an
+exact source digest so both library-ID changes and same-name geometry revisions are replaced once,
+read back through typed IPC, and rolled back as one editor transaction on any mismatch. Board vias also carry
 AI-native arbitrary per-layer copper geometry including custom primitives, explicit unconnected-ring
 and forced-flash policy, complete per-via teardrop geometry and policy, top/bottom backdrilling, tenting, covering,
 plugging, filling, capping, and post-machining intent through KiCad's official typed padstack IPC

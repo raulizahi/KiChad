@@ -1,0 +1,66 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "kichad-macos",
+      "displayName": "KiChad macOS development build",
+      "description": "RelWithDebInfo build with QA tests, Homebrew deps, isolated kichad settings",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release-macos",
+      "installDir": "${sourceDir}/build/install-macos",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/build/install-macos",
+        "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/boost@1.85;/opt/homebrew;/opt/homebrew/opt/protobuf@33",
+        "Boost_ROOT": "/opt/homebrew/opt/boost@1.85",
+        "CMAKE_CXX_FLAGS": "-isystem /opt/homebrew/opt/boost@1.85/include",
+        "CMAKE_C_COMPILER_LAUNCHER": "ccache",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
+        "PYTHON_FRAMEWORK": "/opt/homebrew/opt/python@3.13/Frameworks/Python.framework",
+        "PYTHON_EXECUTABLE": "/opt/homebrew/opt/python@3.13/bin/python3.13",
+        "PYTHON_LIBRARY": "/opt/homebrew/opt/python@3.13/Frameworks/Python.framework/Versions/3.13/lib/libpython3.13.dylib",
+        "PYTHON_INCLUDE_DIR": "/opt/homebrew/opt/python@3.13/Frameworks/Python.framework/Versions/3.13/include/python3.13",
+        "OCC_INCLUDE_DIR": "/opt/homebrew/opt/opencascade/include/opencascade",
+        "OCC_LIBRARY_DIR": "/opt/homebrew/opt/opencascade/lib",
+        "NGSPICE_LIB_NAME": "ngspice",
+        "NGSPICE_ROOT_DIR": "/opt/homebrew/opt/libngspice",
+        "KICAD_BUILD_I18N": "OFF",
+        "KICAD_BUILD_QA_TESTS": "ON",
+        "KICAD_CONFIG_DIR": "kichad",
+        "KICAD_IPC_API": "ON",
+        "KICAD_VERSION_EXTRA": "KiChad",
+        "KICAD_SCRIPTING_WXPYTHON": "OFF",
+        "KICAD_UPDATE_CHECK": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "kichad-macos",
+      "displayName": "Build KiChad (macOS)",
+      "configurePreset": "kichad-macos"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "kichad-macos",
+      "displayName": "Test KiChad (macOS)",
+      "configurePreset": "kichad-macos",
+      "environment": {
+        "KICAD_RUN_FROM_BUILD_DIR": "1"
+      },
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": true
+      }
+    }
+  ]
+}

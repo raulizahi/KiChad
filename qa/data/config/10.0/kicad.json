@@ -7,6 +7,10 @@
   "aui": {
     "show_history_panel": false
   },
+  "codex": {
+    "model": "",
+    "reasoning_effort": ""
+  },
   "color_picker": {
     "default_tab": 0
   },

@@ -542,6 +542,8 @@ public:
      * @param aExisting footprint to replace.
      * @param aNew footprint to put.
      * @param aCommit commit that should store the changes.
+     * @param aPreserveInstanceUuid preserve the existing footprint UUID.  Set false only when an
+     *        atomic caller has already collision-checked a different replacement UUID.
      */
     void ExchangeFootprint( FOOTPRINT* aExisting, FOOTPRINT* aNew, BOARD_COMMIT& aCommit,
                             bool deleteExtraTexts = true,
@@ -552,6 +554,7 @@ public:
                             bool resetFabricationAttrs = true,
                             bool resetClearanceOverrides = true,
                             bool reset3DModels = true,
+                            bool aPreserveInstanceUuid = true,
                             bool* aUpdated = nullptr );
 
     /**

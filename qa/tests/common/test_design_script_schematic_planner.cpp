@@ -11,6 +11,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <kicad/codex/codex_tool_internal.h>
 #include <kicad/codex/design_script_compiler.h>
 #include <kicad/codex/design_script_pcb_planner.h>
 #include <kicad/codex/design_script_schematic_planner.h>
@@ -19,6 +20,10 @@
 #include <wx/file.h>
 #include <wx/filename.h>
 #include <wx/utils.h>
+
+#include <algorithm>
+#include <set>
+#include <sstream>
 
 
 namespace
@@ -225,7 +230,7 @@ BOOST_AUTO_TEST_CASE( LowersResolvedComponentsGlobalNetsAndNoConnectsWithoutPlac
     (unit 1 (sheet root) (at 60mm 40mm) (rotation 90deg) (mirror x)))
   (component R3 (symbol "Local:R") (value "30k") (footprint "LocalFp:R")
     (unit 1 (sheet root) (at 80mm 40mm) (rotation 90deg) (mirror xy)))
-  (net SIGNAL (pin R1 1 1) (pin R2 1 1))
+  (net SIGNAL (presentation labels) (pin R1 1 1) (pin R2 1 1))
   (no_connect R1 1 2)
   (label signal-local (sheet root) (scope local) (net SIGNAL) (at 45mm 40mm)
     (rotation 0deg) (shape none) (size 1.27mm 1.27mm) (thickness auto)
@@ -336,7 +341,7 @@ BOOST_AUTO_TEST_CASE( LowersResolvedComponentsGlobalNetsAndNoConnectsWithoutPlac
                                  "\"RC0603FR-0710KL\"" ),
                     std::string::npos );
     BOOST_CHECK_NE( native.find( "(property \"Reference\" \"R1\"\n"
-                                 "      (at 35 40 0)" ),
+                                 "      (at 34.37 39.37 0)" ),
                     std::string::npos );
     BOOST_CHECK_NE( native.find( "(at 43 42 12.5)" ), std::string::npos );
     BOOST_CHECK_NE( native.find( "(show_name yes)" ), std::string::npos );
@@ -347,13 +352,13 @@ BOOST_AUTO_TEST_CASE( LowersResolvedComponentsGlobalNetsAndNoConnectsWithoutPlac
     BOOST_CHECK_NE( native.find( "(global_label \"SIGNAL\"" ), std::string::npos );
     BOOST_CHECK_NE( native.find( "(no_connect" ), std::string::npos );
     BOOST_CHECK_NE( native.find( "(mirror x)" ), std::string::npos );
-    BOOST_CHECK_NE( native.find( "(at 40 31.11 270)" ), std::string::npos );
-    BOOST_CHECK_NE( native.find( "(at 51.11 40 180)" ), std::string::npos );
-    BOOST_CHECK_NE( native.find( "(wire\n    (pts\n      (xy 40 36.19)\n"
-                                 "      (xy 40 31.11)" ),
+    BOOST_CHECK_NE( native.find( "(at 39.37 30.48 270)" ), std::string::npos );
+    BOOST_CHECK_NE( native.find( "(at 50.8 39.37 180)" ), std::string::npos );
+    BOOST_CHECK_NE( native.find( "(wire\n    (pts\n      (xy 39.37 35.56)\n"
+                                 "      (xy 39.37 30.48)" ),
                     std::string::npos );
-    BOOST_CHECK_NE( native.find( "(at 40 43.81)" ), std::string::npos );
-    BOOST_CHECK_NE( native.find( "(at 80 40 270)" ), std::string::npos );
+    BOOST_CHECK_NE( native.find( "(at 39.37 43.18)" ), std::string::npos );
+    BOOST_CHECK_NE( native.find( "(at 80.01 39.37 270)" ), std::string::npos );
     BOOST_CHECK_EQUAL( native.find( "(mirror x y)" ), std::string::npos );
     BOOST_CHECK_NE( native.find( "(label \"SIGNAL\"" ), std::string::npos );
     BOOST_CHECK_NE( native.find( "(global_label \"SIGNAL\"\n    (shape output)" ),
@@ -362,9 +367,10 @@ BOOST_AUTO_TEST_CASE( LowersResolvedComponentsGlobalNetsAndNoConnectsWithoutPlac
     BOOST_CHECK_NE( native.find( "(thickness 0.2)" ), std::string::npos );
     BOOST_CHECK_NE( native.find( "(bold yes)" ), std::string::npos );
     BOOST_CHECK_NE( native.find( "(italic yes)" ), std::string::npos );
-    BOOST_CHECK_NE( native.find( "(netclass_flag \"\"\n    (length 2.54)\n"
-                                 "    (shape diamond)\n    (at 45 40 90)" ),
-                    std::string::npos );
+    BOOST_CHECK_MESSAGE( native.find( "(netclass_flag \"\"\n    (length 2.54)\n"
+                                      "    (shape diamond)\n    (at 44.45 39.37 90)" )
+                                 != std::string::npos,
+                         native );
     BOOST_CHECK_NE( native.find( "(property \"Netclass\" \"HighSpeed\"" ),
                     std::string::npos );
     BOOST_CHECK_NE( native.find( "(property \"Review Note\" \"route as pair\"" ),
@@ -428,7 +434,7 @@ BOOST_AUTO_TEST_CASE( LowersTypedNestedGroupsAndRejectsMissingNativeOccurrences 
     (unit 1 (sheet root) (at 40mm 40mm) (rotation 0deg) (mirror none)))
   (component R2 (symbol "Local:R") (value "2k") (footprint none)
     (unit 1 (sheet root) (at 60mm 40mm) (rotation 0deg) (mirror none)))
-  (net SIG (pin R1 1 1) (pin R2 1 1))
+  (net SIG (presentation labels) (pin R1 1 1) (pin R2 1 1))
   (no_connect R1 1 2)
   (wire root-wire (sheet root) (from 40mm 40mm) (to 60mm 40mm)
     (stroke default solid))
@@ -535,6 +541,65 @@ BOOST_AUTO_TEST_CASE( TreatsAnUndeclaredHierarchyAsACompleteNoOp )
 }
 
 
+BOOST_AUTO_TEST_CASE( BuildsExportAwareValidationPlanForSchematicOnlySymbols )
+{
+    const std::string program = R"KDS((kichad_design
+  (version 1)
+  (project netlist_eligibility)
+  (library symbol Local (table project) (uri "${KIPRJMOD}/Local.kicad_sym"))
+  (sheet root (parent none) (file "netlist_eligibility.kicad_sch") (title "Main"))
+  (component U1 (symbol "Local:Multi") (value "Multi") (footprint none)
+    (unit 1 (sheet root) (at 20mm 20mm) (rotation 0deg) (mirror none))
+    (unit 2 (sheet root) (at 30mm 20mm) (rotation 0deg) (mirror none)))
+  (component FLG1 (symbol "Local:PWR_FLAG") (value "PWR_FLAG") (footprint none)
+    (unit 1 (sheet root) (at 40mm 20mm) (rotation 0deg) (mirror none)))
+  (component FLG2 (symbol "Local:PWR_FLAG") (value "PWR_FLAG") (footprint none)
+    (unit 1 (sheet root) (at 50mm 20mm) (rotation 0deg) (mirror none)))
+  (net VCC (pin U1 1 1) (pin FLG1 1 1))
+  (no_connect FLG2 1 1)
+))KDS";
+    const KICHAD::DESIGN_SCRIPT_COMPILER::RESULT compiled =
+            KICHAD::DESIGN_SCRIPT_COMPILER::Compile( program );
+    BOOST_REQUIRE_MESSAGE( compiled.ok, compiled.diagnostics.dump() );
+    const nlohmann::json resolved = {
+        { "Local:Multi",
+          { { "flags",
+              { { "excludeFromSim", false }, { "inBom", true },
+                { "onBoard", true }, { "inPosFiles", true } } } } },
+        { "Local:PWR_FLAG",
+          { { "flags",
+              { { "excludeFromSim", true }, { "inBom", false },
+                { "onBoard", false }, { "inPosFiles", false } } } } }
+    };
+    nlohmann::json validationPlan;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(
+            KICHAD::CODEX_TOOLS::BuildNativeNetlistValidationPlan(
+                    compiled.ir, resolved, "netlist_eligibility",
+                    validationPlan, error ),
+            error );
+    BOOST_REQUIRE_EQUAL(
+            validationPlan["expectedNetlistReferences"].size(), 1 );
+    BOOST_CHECK_EQUAL(
+            validationPlan["expectedNetlistReferences"][0].get<std::string>(), "U1" );
+    BOOST_REQUIRE_EQUAL( validationPlan["expectedNetlistNets"].size(), 1 );
+    BOOST_REQUIRE_EQUAL(
+            validationPlan["expectedNetlistNets"][0]["nodes"].size(), 1 );
+    BOOST_CHECK_EQUAL(
+            validationPlan["expectedNetlistNets"][0]["nodes"][0]["reference"]
+                    .get<std::string>(),
+            "U1" );
+    BOOST_CHECK( validationPlan["expectedNetlistNoConnects"].empty() );
+
+    nlohmann::json malformed = resolved;
+    malformed["Local:PWR_FLAG"]["flags"].erase( "onBoard" );
+    error.clear();
+    BOOST_CHECK( !KICHAD::CODEX_TOOLS::BuildNativeNetlistValidationPlan(
+            compiled.ir, malformed, "netlist_eligibility", validationPlan, error ) );
+    BOOST_CHECK_NE( error.find( "on-board eligibility" ), std::string::npos );
+}
+
+
 BOOST_AUTO_TEST_CASE( LowersCanonicalWiresBusesEntriesAndJunctionsToNativeItems )
 {
     const std::string program = R"KDS((kichad_design
@@ -622,19 +687,499 @@ BOOST_AUTO_TEST_CASE( GeneratesOneStableReviewableWireDirectlyBetweenResolvedNet
                     compiled.ir, nlohmann::json::object(), resolved );
     BOOST_REQUIRE_MESSAGE( first.fullyLowered, first.diagnostics.dump() );
     BOOST_CHECK_EQUAL( first.operations.dump(), second.operations.dump() );
-    BOOST_CHECK_EQUAL( first.counts["generatedWires"].get<int>(), 3 );
+    BOOST_CHECK_EQUAL( first.counts["generatedWires"].get<int>(), 1 );
     BOOST_CHECK_EQUAL( first.counts["generatedJunctions"].get<int>(), 0 );
     const std::string native = first.operations[0]["files"][0]["newDocumentSource"];
-    BOOST_CHECK_NE( native.find( "(wire\n    (pts\n      (xy 42.54 40)\n"
-                                 "      (xy 46.35 40)" ),
-                    std::string::npos );
-    BOOST_CHECK_NE( native.find( "(wire\n    (pts\n      (xy 46.35 40)\n"
-                                 "      (xy 53.65 40)" ),
+    BOOST_CHECK_NE( native.find( "(wire\n    (pts\n      (xy 41.91 39.37)\n"
+                                 "      (xy 57.15 39.37)" ),
                     std::string::npos );
     const size_t firstLabel = native.find( "(global_label \"SIGNAL\"" );
     BOOST_REQUIRE_NE( firstLabel, std::string::npos );
-    BOOST_CHECK_NE( native.find( "(global_label \"SIGNAL\"", firstLabel + 1 ),
-                    std::string::npos );
+    BOOST_CHECK_EQUAL( native.find( "(global_label \"SIGNAL\"", firstLabel + 1 ),
+                       std::string::npos );
+}
+
+
+BOOST_AUTO_TEST_CASE( RoutesAroundEndpointTrapsWithBoundedOrthogonalSearch )
+{
+    const std::string program = R"KDS((kichad_design
+  (version 1)
+  (project routed_detour)
+  (library symbol Local (table project) (uri "${KIPRJMOD}/Local.kicad_sym"))
+  (sheet root (parent none) (file "routed_detour.kicad_sch") (title "Detour"))
+  (component HA1 (symbol "Local:One") (value "HA1") (footprint none)
+    (unit 1 (sheet root) (at 38.1mm 48.26mm) (rotation 0deg) (mirror none)))
+  (component HA2 (symbol "Local:One") (value "HA2") (footprint none)
+    (unit 1 (sheet root) (at 43.18mm 48.26mm) (rotation 180deg) (mirror none)))
+  (component HB1 (symbol "Local:One") (value "HB1") (footprint none)
+    (unit 1 (sheet root) (at 38.1mm 53.34mm) (rotation 0deg) (mirror none)))
+  (component HB2 (symbol "Local:One") (value "HB2") (footprint none)
+    (unit 1 (sheet root) (at 43.18mm 53.34mm) (rotation 180deg) (mirror none)))
+  (component V1 (symbol "Local:One") (value "V1") (footprint none)
+    (unit 1 (sheet root) (at 60.96mm 45.72mm) (rotation 90deg) (mirror none)))
+  (component V2 (symbol "Local:One") (value "V2") (footprint none)
+    (unit 1 (sheet root) (at 60.96mm 55.88mm) (rotation 270deg) (mirror none)))
+  (component S1 (symbol "Local:One") (value "S1") (footprint none)
+    (unit 1 (sheet root) (at 40.64mm 50.8mm) (rotation 0deg) (mirror none)))
+  (component S2 (symbol "Local:One") (value "S2") (footprint none)
+    (unit 1 (sheet root) (at 81.28mm 50.8mm) (rotation 180deg) (mirror none)))
+  (net BLOCK_ABOVE (pin HA1 1 1) (pin HA2 1 1))
+  (net BLOCK_BELOW (pin HB1 1 1) (pin HB2 1 1))
+  (net BLOCK_VERTICAL (pin V1 1 1) (pin V2 1 1))
+  (net SIGNAL (pin S1 1 1) (pin S2 1 1))
+))KDS";
+    const KICHAD::DESIGN_SCRIPT_COMPILER::RESULT compiled =
+            KICHAD::DESIGN_SCRIPT_COMPILER::Compile( program );
+    BOOST_REQUIRE_MESSAGE( compiled.ok, compiled.diagnostics.dump() );
+    const std::string cache = R"SYM((symbol "Local:One"
+  (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+  (property "Value" "One" (at 0 0 0) (effects (font (size 1.27 1.27))))
+  (symbol "One_1_1"
+    (pin passive line (at 0 0 180) (length 1.27)
+      (name "" (effects (font (size 1.27 1.27))))
+      (number "1" (effects (font (size 1.27 1.27)))))))
+)SYM";
+    const nlohmann::json resolved = {
+        { "Local:One",
+          { { "libraryId", "Local:One" }, { "cacheSource", cache },
+            { "flags",
+              { { "excludeFromSim", false }, { "inBom", true }, { "onBoard", false },
+                { "inPosFiles", false } } },
+            { "properties", nlohmann::json::object() },
+            { "propertyLayouts", nlohmann::json::object() },
+            { "units",
+              { { "1", nlohmann::json::array(
+                               { { { "number", "1" }, { "xNm", 0 },
+                                   { "yNm", 0 }, { "rotationDegrees", 180 } } } ) } } } } }
+    };
+    const KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::RESULT plan =
+            KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan(
+                    compiled.ir, nlohmann::json::object(), resolved );
+    BOOST_REQUIRE_MESSAGE( plan.fullyLowered, plan.diagnostics.dump() );
+    BOOST_CHECK_EQUAL( plan.counts["isolatedLabelFallbacks"].get<int>(), 0 );
+    size_t signalWires = 0;
+
+    for( const nlohmann::json& item : plan.operations[0]["files"][0]["items"] )
+    {
+        if( item.value( "logicalId", "" ).starts_with( "net_wire/SIGNAL/" ) )
+            ++signalWires;
+    }
+
+    BOOST_CHECK_GE( signalWires, 5 );
+}
+
+
+BOOST_AUTO_TEST_CASE( SynthesizesReadableHierarchyForAutomaticCrossSheetNets )
+{
+    const std::string program = R"KDS((kichad_design
+  (version 1)
+  (project automatic_hierarchy)
+  (library symbol Local (table project) (uri "${KIPRJMOD}/Local.kicad_sym"))
+  (sheet root (parent none) (file "automatic_hierarchy.kicad_sch") (title "Main"))
+  (sheet control (parent root) (file "control.kicad_sch") (title "Control")
+    (at 20mm 20mm) (size 30mm 20mm))
+  (component R1 (symbol "Local:R") (value "10k") (footprint none)
+    (unit 1 (sheet root) (at 60mm 22.54mm) (rotation 0deg) (mirror none)))
+  (component R2 (symbol "Local:R") (value "10k") (footprint none)
+    (unit 1 (sheet control) (at 40mm 20mm) (rotation 0deg) (mirror none)))
+  (net SIGNAL (pin R1 1 1) (pin R2 1 1))
+  (net RETURN (pin R1 1 2) (pin R2 1 2))
+))KDS";
+    const KICHAD::DESIGN_SCRIPT_COMPILER::RESULT compiled =
+            KICHAD::DESIGN_SCRIPT_COMPILER::Compile( program );
+    BOOST_REQUIRE_MESSAGE( compiled.ok, compiled.diagnostics.dump() );
+    BOOST_CHECK_EQUAL( compiled.ir["schematic"]["nets"][0]["presentation"], "auto" );
+    BOOST_CHECK( !compiled.ir["schematic"]["nets"][0]["presentationExplicit"].get<bool>() );
+
+    const std::string cache = R"SYM((symbol "Local:R"
+  (property "Reference" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+  (property "Value" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+  (symbol "R_1_1"
+    (pin passive line (at -2.54 0 0) (length 1.27)
+      (name "" (effects (font (size 1.27 1.27))))
+      (number "1" (effects (font (size 1.27 1.27)))))
+    (pin passive line (at 2.54 0 180) (length 1.27)
+      (name "" (effects (font (size 1.27 1.27))))
+      (number "2" (effects (font (size 1.27 1.27)))))))
+)SYM";
+    const nlohmann::json resolved = {
+        { "Local:R",
+          { { "libraryId", "Local:R" }, { "cacheSource", cache },
+            { "flags",
+              { { "excludeFromSim", false }, { "inBom", true }, { "onBoard", true },
+                { "inPosFiles", true } } },
+            { "properties", nlohmann::json::object() },
+            { "propertyLayouts", nlohmann::json::object() },
+            { "units",
+              { { "1", nlohmann::json::array(
+                               { { { "number", "1" }, { "xNm", -2'540'000 },
+                                   { "yNm", 0 }, { "rotationDegrees", 0 } },
+                                 { { "number", "2" }, { "xNm", 2'540'000 },
+                                   { "yNm", 0 }, { "rotationDegrees", 180 } } } ) } } } } }
+    };
+    const KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::RESULT first =
+            KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan(
+                    compiled.ir, nlohmann::json::object(), resolved );
+    const KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::RESULT second =
+            KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan(
+                    compiled.ir, nlohmann::json::object(), resolved );
+    BOOST_REQUIRE_MESSAGE( first.fullyLowered, first.diagnostics.dump() );
+    BOOST_CHECK_EQUAL( first.operations.dump(), second.operations.dump() );
+    BOOST_CHECK_EQUAL( first.counts["pins"].get<int>(), 2 );
+    BOOST_CHECK_GT( first.counts["generatedWires"].get<int>(), 4 );
+
+    const std::string root = first.operations[0]["files"][0]["newDocumentSource"];
+    const std::string child = first.operations[0]["files"][1]["newDocumentSource"];
+    BOOST_CHECK_NE( root.find( "(pin \"SIGNAL\" passive" ), std::string::npos );
+    BOOST_CHECK_NE( root.find( "(pin \"RETURN\" passive" ), std::string::npos );
+    BOOST_CHECK_NE( root.find( "(wire\n" ), std::string::npos );
+    const size_t rootName = root.find( "(global_label \"SIGNAL\"" );
+    BOOST_REQUIRE_NE( rootName, std::string::npos );
+    BOOST_CHECK_EQUAL( root.find( "(global_label \"SIGNAL\"", rootName + 1 ),
+                       std::string::npos );
+    BOOST_CHECK_NE( child.find( "(hierarchical_label \"SIGNAL\"" ), std::string::npos );
+    BOOST_CHECK_NE( child.find( "(hierarchical_label \"RETURN\"" ), std::string::npos );
+    BOOST_CHECK_NE( child.find( "(wire\n" ), std::string::npos );
+    BOOST_CHECK_EQUAL( child.find( "(global_label \"SIGNAL\"" ), std::string::npos );
+
+    nlohmann::json explicitWiredIr = compiled.ir;
+    for( nlohmann::json& net : explicitWiredIr["schematic"]["nets"] )
+    {
+        net["presentation"] = "wired";
+        net["presentationExplicit"] = true;
+    }
+    const KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::RESULT explicitWired =
+            KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan(
+                    explicitWiredIr, nlohmann::json::object(), resolved );
+    BOOST_REQUIRE_MESSAGE( explicitWired.fullyLowered, explicitWired.diagnostics.dump() );
+    BOOST_CHECK_EQUAL( explicitWired.counts["pins"].get<int>(), 2 );
+    BOOST_CHECK_GT( explicitWired.counts["generatedWires"].get<int>(), 4 );
+
+    wxString exportDirectory;
+
+    if( wxGetEnv( wxS( "KICHAD_QA_EXPORT_AUTOMATIC_HIERARCHY_DIR" ),
+                  &exportDirectory ) )
+    {
+        BOOST_REQUIRE( wxFileName::Mkdir( exportDirectory, wxS_DIR_DEFAULT,
+                                         wxPATH_MKDIR_FULL )
+                       || wxDirExists( exportDirectory ) );
+
+        for( const nlohmann::json& file : first.operations[0]["files"] )
+        {
+            wxFileName target( wxString::FromUTF8( file["path"].get<std::string>() ) );
+            target.MakeAbsolute( exportDirectory );
+            BOOST_REQUIRE( wxFileName::Mkdir( target.GetPath(), wxS_DIR_DEFAULT,
+                                             wxPATH_MKDIR_FULL )
+                           || wxDirExists( target.GetPath() ) );
+            const std::string source = file["newDocumentSource"].get<std::string>();
+            wxFile output;
+            BOOST_REQUIRE( output.Create( target.GetFullPath(), true ) );
+            BOOST_REQUIRE_EQUAL( output.Write( source.data(), source.size() ), source.size() );
+            BOOST_REQUIRE( output.Flush() );
+        }
+
+        const auto writeSupportFile = [&]( const wxString& aName,
+                                           const std::string& aSource )
+        {
+            wxFile output;
+            const wxFileName target( exportDirectory, aName );
+            BOOST_REQUIRE( output.Create( target.GetFullPath(), true ) );
+            BOOST_REQUIRE_EQUAL( output.Write( aSource.data(), aSource.size() ),
+                                 aSource.size() );
+            BOOST_REQUIRE( output.Flush() );
+        };
+        writeSupportFile(
+                wxS( "Local.kicad_sym" ),
+                "(kicad_symbol_lib\n  (version 20251024)\n"
+                "  (generator \"kicad_symbol_editor\")\n"
+                "  (generator_version \"10.0\")\n  " + cache + "\n)\n" );
+        writeSupportFile(
+                wxS( "sym-lib-table" ),
+                "(sym_lib_table\n  (version 7)\n"
+                "  (lib (name \"Local\") (type \"KiCad\") "
+                "(uri \"${KIPRJMOD}/Local.kicad_sym\") (options \"\") (descr \"\"))\n)\n" );
+        writeSupportFile( wxS( "automatic_hierarchy.kicad_pro" ), "{}\n" );
+    }
+}
+
+
+BOOST_AUTO_TEST_CASE( KeepsAdjacentMultiPinWiredNetsElectricallyIsolated )
+{
+    const std::string program = R"KDS((kichad_design
+  (version 1)
+  (project isolated_wired_nets)
+  (library symbol Local (table project) (uri "${KIPRJMOD}/Local.kicad_sym"))
+  (sheet root (parent none) (file "isolated_wired_nets.kicad_sch") (title "USB"))
+  (component J1 (symbol "Local:USB") (value "USB") (footprint none)
+    (unit 1 (sheet root) (at 50.8mm 88.9mm) (rotation 0deg) (mirror none)))
+  (component U1 (symbol "Local:USB") (value "Protection") (footprint none)
+    (unit 1 (sheet root) (at 114.3mm 88.9mm) (rotation 0deg) (mirror none)))
+  (net "USB_D-_RAW" (presentation wired) (pin J1 1 1) (pin J1 1 2) (pin U1 1 5))
+  (net "USB_D+_RAW" (presentation wired) (pin J1 1 3) (pin J1 1 4) (pin U1 1 6))
+))KDS";
+    const KICHAD::DESIGN_SCRIPT_COMPILER::RESULT compiled =
+            KICHAD::DESIGN_SCRIPT_COMPILER::Compile( program );
+    BOOST_REQUIRE_MESSAGE( compiled.ok, compiled.diagnostics.dump() );
+    const std::string cache = R"SYM((symbol "Local:USB"
+  (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+  (property "Value" "USB" (at 0 0 0) (effects (font (size 1.27 1.27))))
+  (symbol "USB_1_1"
+    (pin passive line (at -25.4 0 0) (length 1.27)
+      (name "D-1" (effects (font (size 1.27 1.27))))
+      (number "1" (effects (font (size 1.27 1.27)))))
+    (pin passive line (at 0 0 180) (length 1.27)
+      (name "D-2" (effects (font (size 1.27 1.27))))
+      (number "2" (effects (font (size 1.27 1.27)))))
+    (pin passive line (at -25.4 2.54 0) (length 1.27)
+      (name "D+1" (effects (font (size 1.27 1.27))))
+      (number "3" (effects (font (size 1.27 1.27)))))
+    (pin passive line (at 0 2.54 180) (length 1.27)
+      (name "D+2" (effects (font (size 1.27 1.27))))
+      (number "4" (effects (font (size 1.27 1.27)))))
+    (pin passive line (at -5.08 0 0) (length 1.27)
+      (name "D-OUT" (effects (font (size 1.27 1.27))))
+      (number "5" (effects (font (size 1.27 1.27)))))
+    (pin passive line (at -5.08 -2.54 0) (length 1.27)
+      (name "D+OUT" (effects (font (size 1.27 1.27))))
+      (number "6" (effects (font (size 1.27 1.27)))))))
+)SYM";
+    const nlohmann::json pins = nlohmann::json::array(
+            { { { "number", "1" }, { "xNm", -25'400'000 }, { "yNm", 0 },
+                { "rotationDegrees", 0 } },
+              { { "number", "2" }, { "xNm", 0 }, { "yNm", 0 },
+                { "rotationDegrees", 180 } },
+              { { "number", "3" }, { "xNm", -25'400'000 }, { "yNm", 2'540'000 },
+                { "rotationDegrees", 0 } },
+              { { "number", "4" }, { "xNm", 0 }, { "yNm", 2'540'000 },
+                { "rotationDegrees", 180 } },
+              { { "number", "5" }, { "xNm", -5'080'000 }, { "yNm", 0 },
+                { "rotationDegrees", 0 } },
+              { { "number", "6" }, { "xNm", -5'080'000 }, { "yNm", -2'540'000 },
+                { "rotationDegrees", 0 } } } );
+    const nlohmann::json resolved = {
+        { "Local:USB",
+          { { "libraryId", "Local:USB" }, { "cacheSource", cache },
+            { "flags", { { "excludeFromSim", false }, { "inBom", true },
+                           { "onBoard", true }, { "inPosFiles", true } } },
+            { "properties", nlohmann::json::object() },
+            { "propertyLayouts", nlohmann::json::object() },
+            { "units", { { "1", pins } } } } }
+    };
+    const KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::RESULT plan =
+            KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan(
+                    compiled.ir, nlohmann::json::object(), resolved );
+    BOOST_REQUIRE_MESSAGE( plan.fullyLowered, plan.diagnostics.dump() );
+    BOOST_CHECK_EQUAL( plan.counts["isolatedLabelFallbacks"].get<int>(), 0 );
+
+    std::set<std::string> routedNets;
+
+    for( const nlohmann::json& item : plan.operations[0]["files"][0]["items"] )
+    {
+        const std::string logicalId = item.value( "logicalId", "" );
+
+        if( logicalId.starts_with( "net_wire/USB_D-_RAW/" ) )
+            routedNets.emplace( "USB_D-_RAW" );
+        else if( logicalId.starts_with( "net_wire/USB_D+_RAW/" ) )
+            routedNets.emplace( "USB_D+_RAW" );
+    }
+
+    BOOST_CHECK_EQUAL( routedNets.size(), 2 );
+
+    // A crowded page can force physical routing to fall back to labels.  Presentation may
+    // change in that case, but a PCB-facing global net name must never become sheet-qualified.
+    nlohmann::json congestedIr = compiled.ir;
+    nlohmann::json blocker = congestedIr["schematic"]["nets"][0];
+    blocker["name"] = "BLOCKER";
+    blocker["pins"] = nlohmann::json::array(
+            { { { "component", "J1" }, { "unit", 1 }, { "number", "5" } },
+              { { "component", "U1" }, { "unit", 1 }, { "number", "1" } } } );
+    congestedIr["schematic"]["nets"].push_back( std::move( blocker ) );
+    const KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::RESULT congestedPlan =
+            KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan(
+                    congestedIr, nlohmann::json::object(), resolved );
+    BOOST_REQUIRE_MESSAGE( congestedPlan.fullyLowered, congestedPlan.diagnostics.dump() );
+    BOOST_CHECK_GT( congestedPlan.counts["isolatedLabelFallbacks"].get<int>(), 0 );
+    size_t isolatedMinusLabels = 0;
+
+    for( const nlohmann::json& item : congestedPlan.operations[0]["files"][0]["items"] )
+    {
+        if( !item.value( "logicalId", "" ).starts_with(
+                    "net_isolated_label/USB_D-_RAW/" ) )
+        {
+            continue;
+        }
+
+        ++isolatedMinusLabels;
+        BOOST_CHECK_EQUAL( item["kind"].get<std::string>(), "global_label" );
+        BOOST_CHECK_NE( item["source"].get<std::string>().find(
+                                "(global_label \"USB_D-_RAW\"" ),
+                        std::string::npos );
+    }
+
+    BOOST_CHECK_EQUAL( isolatedMinusLabels, 3 );
+
+    wxString exportDirectory;
+
+    if( wxGetEnv( wxS( "KICHAD_QA_EXPORT_USB_WIRED_DIR" ), &exportDirectory ) )
+    {
+        BOOST_REQUIRE( wxFileName::Mkdir( exportDirectory, wxS_DIR_DEFAULT,
+                                         wxPATH_MKDIR_FULL )
+                       || wxDirExists( exportDirectory ) );
+        const wxFileName schematicPath( exportDirectory,
+                                        wxS( "isolated_wired_nets.kicad_sch" ) );
+        const std::string source =
+                congestedPlan.operations[0]["files"][0]["newDocumentSource"].get<std::string>();
+        wxFile schematic;
+        BOOST_REQUIRE( schematic.Create( schematicPath.GetFullPath(), true ) );
+        BOOST_REQUIRE_EQUAL( schematic.Write( source.data(), source.size() ), source.size() );
+        BOOST_REQUIRE( schematic.Flush() );
+
+        wxFile project;
+        BOOST_REQUIRE( project.Create(
+                wxFileName( exportDirectory, wxS( "isolated_wired_nets.kicad_pro" ) )
+                        .GetFullPath(), true ) );
+        BOOST_REQUIRE_EQUAL( project.Write( "{}\n", 3 ), 3 );
+        BOOST_REQUIRE( project.Flush() );
+    }
+}
+
+
+BOOST_AUTO_TEST_CASE( RoutesBulkCrossSheetWiredNetsWithoutMergingInterfaces )
+{
+    constexpr int NET_COUNT = 24;
+    std::ostringstream program;
+    std::ostringstream cache;
+    nlohmann::json pins = nlohmann::json::array();
+    program << "(kichad_design\n  (version 1)\n  (project bulk_hierarchy)\n"
+               "  (library symbol Local (table project) (uri \"${KIPRJMOD}/Local.kicad_sym\"))\n"
+               "  (sheet root (parent none) (file \"bulk_hierarchy.kicad_sch\") (title \"Main\"))\n"
+               "  (sheet left (parent root) (file \"left.kicad_sch\") (title \"Left\")"
+               " (at 25.4mm 25.4mm) (size 50.8mm 76.2mm))\n"
+               "  (sheet right (parent root) (file \"right.kicad_sch\") (title \"Right\")"
+               " (at 101.6mm 25.4mm) (size 50.8mm 76.2mm))\n"
+               "  (component U1 (symbol \"Local:Hub\") (value \"Hub\") (footprint none)"
+               " (unit 1 (sheet left) (at 76.2mm 76.2mm) (rotation 0deg) (mirror none)))\n"
+               "  (component U2 (symbol \"Local:Hub\") (value \"Hub\") (footprint none)"
+               " (unit 1 (sheet right) (at 76.2mm 76.2mm) (rotation 0deg) (mirror none)))\n";
+    cache << "(symbol \"Local:Hub\"\n"
+             "  (property \"Reference\" \"U\" (at 0 0 0) (effects (font (size 1.27 1.27))))\n"
+             "  (property \"Value\" \"Hub\" (at 0 0 0) (effects (font (size 1.27 1.27))))\n"
+             "  (symbol \"Hub_1_1\"\n";
+
+    for( int index = 0; index < NET_COUNT; ++index )
+    {
+        const std::string number = std::to_string( index + 1 );
+        const std::string netName = index < 10 ? "N0" + std::to_string( index )
+                                               : "N" + std::to_string( index );
+        const int64_t yNm = static_cast<int64_t>( NET_COUNT / 2 - index ) * 2'540'000;
+        const double yMm = static_cast<double>( yNm ) / 1'000'000.0;
+        program << "  (net " << netName
+                << " (presentation wired) (pin U1 1 " << number << ") (pin U2 1 "
+                << number << "))\n";
+        cache << "    (pin passive line (at 0 " << yMm << " 180) (length 1.27)"
+                 " (name \"" << netName
+              << "\" (effects (font (size 1.27 1.27))))"
+                 " (number \"" << number
+              << "\" (effects (font (size 1.27 1.27)))))\n";
+        pins.push_back( { { "number", number }, { "xNm", 0 }, { "yNm", yNm },
+                          { "rotationDegrees", 180 } } );
+    }
+
+    program << ")";
+    cache << "  ))";
+    const KICHAD::DESIGN_SCRIPT_COMPILER::RESULT compiled =
+            KICHAD::DESIGN_SCRIPT_COMPILER::Compile( program.str() );
+    BOOST_REQUIRE_MESSAGE( compiled.ok, compiled.diagnostics.dump() );
+    const nlohmann::json resolved = {
+        { "Local:Hub",
+          { { "libraryId", "Local:Hub" }, { "cacheSource", cache.str() },
+            { "flags", { { "excludeFromSim", false }, { "inBom", true },
+                           { "onBoard", true }, { "inPosFiles", true } } },
+            { "properties", nlohmann::json::object() },
+            { "propertyLayouts", nlohmann::json::object() },
+            { "units", { { "1", pins } } } } }
+    };
+    const KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::RESULT plan =
+            KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan(
+                    compiled.ir, nlohmann::json::object(), resolved );
+    BOOST_REQUIRE_MESSAGE( plan.fullyLowered, plan.diagnostics.dump() );
+    BOOST_CHECK_EQUAL( plan.counts["pins"].get<int>(), NET_COUNT * 2 );
+    BOOST_CHECK_EQUAL( plan.counts["isolatedLabelFallbacks"].get<int>(), 0 );
+    BOOST_CHECK_GT( plan.counts["generatedWires"].get<int>(), NET_COUNT * 2 );
+
+    wxString exportDirectory;
+
+    if( wxGetEnv( wxS( "KICHAD_QA_EXPORT_BULK_HIERARCHY_DIR" ), &exportDirectory ) )
+    {
+        BOOST_REQUIRE( wxFileName::Mkdir( exportDirectory, wxS_DIR_DEFAULT,
+                                         wxPATH_MKDIR_FULL )
+                       || wxDirExists( exportDirectory ) );
+
+        for( const nlohmann::json& file : plan.operations[0]["files"] )
+        {
+            wxFileName target( wxString::FromUTF8( file["path"].get<std::string>() ) );
+            target.MakeAbsolute( exportDirectory );
+            const std::string source = file["newDocumentSource"].get<std::string>();
+            wxFile output;
+            BOOST_REQUIRE( output.Create( target.GetFullPath(), true ) );
+            BOOST_REQUIRE_EQUAL( output.Write( source.data(), source.size() ), source.size() );
+            BOOST_REQUIRE( output.Flush() );
+        }
+
+        const auto writeSupportFile = [&]( const wxString& aName,
+                                           const std::string& aSource )
+        {
+            wxFile output;
+            const wxFileName target( exportDirectory, aName );
+            BOOST_REQUIRE( output.Create( target.GetFullPath(), true ) );
+            BOOST_REQUIRE_EQUAL( output.Write( aSource.data(), aSource.size() ),
+                                 aSource.size() );
+            BOOST_REQUIRE( output.Flush() );
+        };
+        writeSupportFile(
+                wxS( "Local.kicad_sym" ),
+                "(kicad_symbol_lib\n  (version 20251024)\n"
+                "  (generator \"kicad_symbol_editor\")\n"
+                "  (generator_version \"10.0\")\n  " + cache.str() + "\n)\n" );
+        writeSupportFile(
+                wxS( "sym-lib-table" ),
+                "(sym_lib_table\n  (version 7)\n"
+                "  (lib (name \"Local\") (type \"KiCad\") "
+                "(uri \"${KIPRJMOD}/Local.kicad_sym\") (options \"\") (descr \"\"))\n)\n" );
+        writeSupportFile( wxS( "bulk_hierarchy.kicad_pro" ), "{}\n" );
+
+        std::string nativeError;
+        const wxFileName root( exportDirectory, wxS( "bulk_hierarchy.kicad_sch" ) );
+        BOOST_REQUIRE_MESSAGE(
+                KICHAD::CODEX_TOOLS::ValidateNativeSchematicHierarchy(
+                        root, compiled.ir, resolved, nativeError ),
+                nativeError );
+
+        const auto leftFile = std::find_if(
+                plan.operations[0]["files"].begin(), plan.operations[0]["files"].end(),
+                []( const nlohmann::json& aFile )
+                {
+                    return aFile.value( "path", "" ) == "left.kicad_sch";
+                } );
+        BOOST_REQUIRE( leftFile != plan.operations[0]["files"].end() );
+        const std::string leftSource =
+                leftFile->at( "newDocumentSource" ).get<std::string>();
+        std::string corruptedLeft = leftSource;
+        const std::string distinctLabel = "(hierarchical_label \"N01\"";
+        const size_t labelPosition = corruptedLeft.find( distinctLabel );
+        BOOST_REQUIRE_NE( labelPosition, std::string::npos );
+        corruptedLeft.replace( labelPosition, distinctLabel.size(),
+                               "(hierarchical_label \"N00\"" );
+        writeSupportFile( wxS( "left.kicad_sch" ), corruptedLeft );
+
+        nativeError.clear();
+        BOOST_CHECK( !KICHAD::CODEX_TOOLS::ValidateNativeSchematicHierarchy(
+                root, compiled.ir, resolved, nativeError ) );
+        BOOST_CHECK_NE( nativeError.find(
+                                "native schematic connectivity does not match compiled KDS" ),
+                        std::string::npos );
+        writeSupportFile( wxS( "left.kicad_sch" ), leftSource );
+    }
 }
 
 

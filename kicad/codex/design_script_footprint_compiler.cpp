@@ -347,16 +347,22 @@ JSON compileModel( const DOCUMENT& aDocument, size_t aNode, RESULT& aResult )
 {
     const DOCUMENT::NODE& node = aDocument.Nodes().at( aNode );
     std::string path;
+    const auto trustedRoot = []( const std::string& aPath )
+    {
+        return aPath.starts_with( "${KIPRJMOD}/" )
+               || aPath.starts_with( "${KICAD10_3DMODEL_DIR}/" );
+    };
 
     if( node.children.size() < 2 || !scalar( aDocument, node.children[1], path )
-        || !path.starts_with( "${KIPRJMOD}/" ) || path.size() > 4096
+        || !trustedRoot( path ) || path.size() > 4096
         || path.find( '\0' ) != std::string::npos || path.find_first_of( "\r\n" ) != std::string::npos
         || path.find( '\\' ) != std::string::npos || path.find( "/../" ) != std::string::npos
         || !( path.ends_with( ".step" ) || path.ends_with( ".stp" )
               || path.ends_with( ".wrl" ) ) )
     {
         diagnostic( aResult, "invalid_authored_footprint_model_path",
-                    "footprint model requires a confined project STEP, STP, or WRL path" );
+                    "footprint model requires a confined project or KiCad 10 stock-library "
+                    "STEP, STP, or WRL path" );
         return JSON::object();
     }
 

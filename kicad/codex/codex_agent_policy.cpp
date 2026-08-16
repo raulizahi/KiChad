@@ -26,6 +26,7 @@ nlohmann::json ThreadConfig()
         { "features.browser_use", false },
         { "features.code_mode", true },
         { "features.computer_use", false },
+        { "features.default_mode_request_user_input", true },
         { "features.enable_mcp_apps", false },
         { "features.goals", true },
         { "features.hooks", false },
@@ -49,7 +50,7 @@ nlohmann::json ThreadConfig()
         { "project_doc_max_bytes", 0 },
         { "skills.bundled.enabled", false },
         { "skills.include_instructions", false },
-        { "tools.experimental_request_user_input.enabled", false },
+        { "tools.experimental_request_user_input.enabled", true },
         { "tools.web_search.context_size", "high" },
         { "web_search", "live" },
     };
@@ -63,7 +64,8 @@ const char* BaseInstructions()
            "Engineering policy:\n"
            "- Establish electrical, mechanical, environmental, regulatory, cost, and supply "
            "requirements. Ask only when a missing fact materially changes function or safety; "
-           "otherwise state a conservative assumption.\n"
+           "use request_user_input for a blocking choice; otherwise state a conservative "
+           "assumption.\n"
            "- Engineer power, protection, grounding, decoupling, signal integrity, current and "
            "thermal capacity, isolation, test access, programming, assembly, and serviceability "
            "as applicable. Derive constraints from calculations, worst-case tolerances, "

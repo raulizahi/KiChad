@@ -456,4 +456,10 @@ message ParseAndCreateItemsFromString
   // editor confines this to Reference/Value presentation so library geometry and identity cannot
   // be replaced through the parsing endpoint.
   google.protobuf.FieldMask field_mask = 4;
+
+  // When present, atomically exchange this existing footprint for the parsed footprint instead
+  // of running the generic creation path.  The PCB editor uses its native footprint-exchange
+  // machinery so the old item and the replacement are staged in the same editor commit, pad and
+  // child identities are reconciled safely, and rollback restores the complete original.
+  kiapi.common.types.KIID replace_item_id = 5;
 }

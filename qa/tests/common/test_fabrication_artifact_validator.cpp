@@ -232,6 +232,17 @@ BOOST_AUTO_TEST_CASE( AcceptsExactKiCadNetlistAndRejectsConnectivityDrift )
             error );
 
     error.clear();
+    std::string missingComponent = valid;
+    const std::string componentRecord = "(comp (ref \"R2\"))";
+    const size_t componentPosition = missingComponent.find( componentRecord );
+    BOOST_REQUIRE_NE( componentPosition, std::string::npos );
+    missingComponent.erase( componentPosition, componentRecord.size() );
+    BOOST_CHECK( !KICHAD::FABRICATION_ARTIFACT_VALIDATOR::ValidateKiCadNetlist(
+            fixture.Write( "missing-component.net", missingComponent ), plan, error ) );
+    BOOST_CHECK_NE( error.find( "expected 2, native 1" ), std::string::npos );
+    BOOST_CHECK_NE( error.find( "missing from native export: R2" ), std::string::npos );
+
+    error.clear();
     std::string drifted = valid;
     const size_t secondReference = drifted.rfind( "(ref \"R2\")" );
     BOOST_REQUIRE_NE( secondReference, std::string::npos );

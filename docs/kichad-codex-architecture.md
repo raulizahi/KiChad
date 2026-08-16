@@ -43,6 +43,12 @@ board, symbol, and footprint s-expressions in-process and returns structural sum
 matching expressions.
 It accepts only existing project-relative paths, resolves symlinks before enforcing the project
 root, checks the file extension against the document root, caps input/output sizes, and never writes.
+Its native schematic renderer returns a hierarchy overview with scaled child-sheet content inside
+each root-level sheet box, plus a bounded set of referenced subsheets as separate full-resolution
+images when `page` is omitted. The result reports the total, rendered count, and truncation; a page
+number can inspect any sheet. Page metadata identifies the sheet name, instance path, source file,
+and root placement bounds, and one batch export keeps multi-sheet review fast while preserving
+KiCad's hierarchy semantics.
 `design` is the compiler front end for reusable `.kicad_kds` KiChad Design Script sidecars.  It
 describes the versioned language, reads the exact bounded source as model context, compiles either
 inline source or a project-confined sidecar into a private deterministic validated IR and pass plan,
@@ -210,9 +216,14 @@ Component declarations use one explicit multi-unit form. Before planning, KiChad
 the referenced project-local symbol libraries, confines canonical paths to the project, rejects
 symlinks, and passes their exact bytes to the lossless symbol resolver. The resolver extracts the
 named native symbol and unit pin geometry; the planner then emits stable placed-symbol/pin UUIDs and
-transforms each KDS net or no-connect endpoint onto a real pin coordinate. Project-global KDS nets
-lower to native global labels, so connectivity spans hierarchy screens without a second net
-representation. Cached symbols are reconciled by library ID inside each screen's `lib_symbols`
+transforms each KDS net or no-connect endpoint onto a real pin coordinate. KDS nets default to
+physical wire routing. Same-screen endpoints receive one orthogonal tree; cross-screen
+endpoints synthesize the necessary native sheet pins, matching hierarchical labels, and per-page
+wire paths. Two attached naming anchors on one routed page preserve the exact unqualified KDS/PCB
+net name without replacing that physical hierarchy. Explicit label presentation remains available
+only for deliberately global connectivity. Electrical anchors are snapped to KiCad's native
+connection grid during lowering so visually touching items cannot remain electrically detached.
+Cached symbols are reconciled by library ID inside each screen's `lib_symbols`
 container while unrelated cache entries retain their bytes. Bounded same-library inheritance is
 flattened with KiCad's field override semantics because schematic caches cannot contain `extends`;
 missing parents, cycles, unsupported inherited content, unresolved pins, and unmanaged collisions

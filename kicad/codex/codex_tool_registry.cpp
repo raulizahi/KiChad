@@ -56,7 +56,8 @@ std::string failureState( const std::string& aCode, const std::string& aTool,
                                            "snapshot_required", "dependency_unavailable",
                                            "pcb_editor_unavailable", "backend_incomplete",
                                            "invalid_plan", "symbol_generation_failed",
-                                           "footprint_generation_failed" } )
+                                           "footprint_generation_failed",
+                                           "schematic_preflight_failed" } )
         || aCode.find( "inventory_failed" ) != std::string::npos )
     {
         return "none";
@@ -293,8 +294,7 @@ JSON recoveryFor( const std::string& aCode, const std::string& aTool,
 CODEX_TOOL_REGISTRY::CODEX_TOOL_REGISTRY( std::function<wxString()> aProjectPathProvider,
                                           std::function<bool()> aMutationGuard,
                                           std::function<wxString()> aIpcSocketDirectoryProvider,
-                                          std::function<bool( const wxFileName&, std::string& )>
-                                                  aSchematicValidator,
+                                          NATIVE_SCHEMATIC_VALIDATOR aSchematicValidator,
                                           NATIVE_CHECK_RUNNER aNativeCheckRunner,
                                           NATIVE_FABRICATION_RUNNER aNativeFabricationRunner,
                                           std::function<bool( const wxFileName&, std::string& )>

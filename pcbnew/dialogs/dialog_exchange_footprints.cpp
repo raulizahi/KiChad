@@ -388,6 +388,7 @@ void DIALOG_EXCHANGE_FOOTPRINTS::processFootprint( FOOTPRINT* aFootprint, const 
                                  m_resetFabricationAttrs->GetValue(),
                                  m_resetClearanceOverrides->GetValue(),
                                  m_reset3DModels->GetValue(),
+                                 true,
                                  &updated );
 
     if( aFootprint == m_currentFootprint )
@@ -452,5 +453,4 @@ void DIALOG_EXCHANGE_FOOTPRINTS::ViewAndSelectFootprint( wxCommandEvent& event )
         frame->Destroy();
     }
 }
-
 

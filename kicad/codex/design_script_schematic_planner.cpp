@@ -21,12 +21,17 @@
 #include <cstdint>
 #include <functional>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <optional>
+#include <queue>
 #include <set>
 #include <tuple>
 #include <sstream>
 #include <string>
+#include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 
@@ -171,6 +176,21 @@ int sideAngle( const std::string& aSide )
 }
 
 
+constexpr int64_t SCHEMATIC_CONNECTION_GRID_NM = 1'270'000;
+
+
+int64_t snapConnectionGrid( int64_t aCoordinate )
+{
+    if( aCoordinate <= 0 )
+        return 0;
+
+    // KiCad's normal schematic connection grid is 50 mil.  Resolve exact half-grid values
+    // toward the lower coordinate so the transform is stable on every platform.
+    return ( aCoordinate + SCHEMATIC_CONNECTION_GRID_NM / 2 - 1 )
+           / SCHEMATIC_CONNECTION_GRID_NM * SCHEMATIC_CONNECTION_GRID_NM;
+}
+
+
 std::string sheetPin( const JSON& aPin, const std::string& aUuid )
 {
     std::ostringstream output;
@@ -248,16 +268,19 @@ std::string sheetExpression( const JSON& aSheet, const std::string& aProject,
 
 
 std::string hierarchicalLabel( const JSON& aSheet, const JSON& aPin,
-                               const std::string& aProject, size_t aIndex )
+                               const std::string& aProject, int64_t aX, int64_t aY,
+                               int aRotation )
 {
     const std::string id = aSheet.at( "id" ).get<std::string>();
-    const int64_t y = 20'000'000 + static_cast<int64_t>( aIndex ) * 2'540'000;
+    const std::string justification =
+            aRotation == 0 || aRotation == 90 ? "left" : "right";
     std::ostringstream output;
     output << "(hierarchical_label " << quoted( aPin.at( "name" ).get<std::string>() )
            << "\n"
            << "    (shape " << aPin.at( "direction" ).get<std::string>() << ")\n"
-           << "    (at 20 " << millimetres( y ) << " 180)\n"
-           << effects( "right" )
+           << "    (at " << millimetres( aX ) << ' ' << millimetres( aY ) << ' '
+           << aRotation << ")\n"
+           << effects( justification )
            << "    (uuid "
            << quoted( stableUuid( aProject, "schematic_hier_label",
                                   id + "/" + aPin.at( "name" ).get<std::string>() ) )
@@ -619,6 +642,21 @@ std::string globalLabelExpression( const std::string& aName, int64_t aX, int64_t
            << "    (fields_autoplaced yes)\n"
            // Generated sheets are dense; standard 1.27mm boxed labels overwhelm them.
            << effects( justification, "1.0" )
+           << "    (uuid " << quoted( aUuid ) << ")\n"
+           << "  )";
+    return output.str();
+}
+
+
+std::string localLabelExpression( const std::string& aName, int64_t aX, int64_t aY,
+                                  int aRotation, const std::string& aUuid )
+{
+    const std::string justification = aRotation == 0 || aRotation == 90 ? "left" : "right";
+    std::ostringstream output;
+    output << "(label " << quoted( aName ) << "\n"
+           << "    (at " << millimetres( aX ) << ' ' << millimetres( aY ) << ' '
+           << aRotation << ")\n"
+           << effects( justification )
            << "    (uuid " << quoted( aUuid ) << ")\n"
            << "  )";
     return output.str();
@@ -2329,6 +2367,8 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
                       { "components", 0 }, { "netEndpoints", 0 },
                       { "noConnects", 0 }, { "drawings", 0 }, { "busAliases", 0 },
                       { "generatedWires", 0 }, { "generatedJunctions", 0 },
+                      { "isolatedLabelFallbacks", 0 },
+                      { "gridAdjustments", 0 },
                       { "groups", 0 },
                       { "librarySymbols", 0 },
                       { "managedItems", 0 } };
@@ -2381,13 +2421,144 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
             return result;
         }
     }
-    const JSON& sourceSheets = aCompilerIr["schematic"]["sheets"];
-    const JSON& sourceComponents = aCompilerIr["schematic"]["components"];
+    JSON sourceSheets = aCompilerIr["schematic"]["sheets"];
+    JSON sourceComponents = aCompilerIr["schematic"]["components"];
     const JSON& sourceNets = aCompilerIr["schematic"]["nets"];
     const JSON& sourceNoConnects = aCompilerIr["schematic"]["noConnects"];
-    const JSON& sourceDrawings = aCompilerIr["schematic"]["drawings"];
+    JSON sourceDrawings = aCompilerIr["schematic"]["drawings"];
     const JSON& sourceBusAliases = aCompilerIr["schematic"]["busAliases"];
     const JSON& sourceGroups = aCompilerIr["schematic"]["groups"];
+
+    size_t gridAdjustments = 0;
+    const auto snapCoordinate = [&]( JSON& aCoordinate )
+    {
+        if( !aCoordinate.is_number_integer() )
+            return;
+
+        const int64_t original = aCoordinate.get<int64_t>();
+        const int64_t snapped = snapConnectionGrid( original );
+
+        if( original != snapped )
+        {
+            aCoordinate = snapped;
+            ++gridAdjustments;
+        }
+    };
+    const auto snapPoint = [&]( JSON& aPoint )
+    {
+        if( aPoint.is_object() && aPoint.contains( "xNm" ) && aPoint.contains( "yNm" ) )
+        {
+            snapCoordinate( aPoint["xNm"] );
+            snapCoordinate( aPoint["yNm"] );
+        }
+    };
+
+    for( JSON& sheet : sourceSheets )
+    {
+        if( !sheet.is_object() || !sheet.contains( "position" )
+            || !sheet["position"].is_object() || !sheet.contains( "size" )
+            || !sheet["size"].is_object() )
+        {
+            continue;
+        }
+
+        const int64_t originalX = sheet["position"].value( "xNm", int64_t( 0 ) );
+        const int64_t originalY = sheet["position"].value( "yNm", int64_t( 0 ) );
+        const int64_t originalRight = originalX
+                                      + sheet["size"].value( "xNm", int64_t( 0 ) );
+        const int64_t originalBottom = originalY
+                                       + sheet["size"].value( "yNm", int64_t( 0 ) );
+        snapPoint( sheet["position"] );
+        int64_t left = sheet["position"].value( "xNm", int64_t( 0 ) );
+        int64_t top = sheet["position"].value( "yNm", int64_t( 0 ) );
+        int64_t right = std::max( left + SCHEMATIC_CONNECTION_GRID_NM,
+                                  snapConnectionGrid( originalRight ) );
+        int64_t bottom = std::max( top + SCHEMATIC_CONNECTION_GRID_NM,
+                                   snapConnectionGrid( originalBottom ) );
+
+        if( sheet["size"].value( "xNm", int64_t( 0 ) ) != right - left )
+        {
+            sheet["size"]["xNm"] = right - left;
+            ++gridAdjustments;
+        }
+
+        if( sheet["size"].value( "yNm", int64_t( 0 ) ) != bottom - top )
+        {
+            sheet["size"]["yNm"] = bottom - top;
+            ++gridAdjustments;
+        }
+
+        if( !sheet.contains( "pins" ) || !sheet["pins"].is_array() )
+            continue;
+
+        for( JSON& pin : sheet["pins"] )
+        {
+            if( !pin.is_object() || !pin.contains( "position" )
+                || !pin["position"].is_object() || !pin.contains( "side" )
+                || !pin["side"].is_string() )
+            {
+                continue;
+            }
+
+            snapPoint( pin["position"] );
+            const std::string side = pin["side"].get<std::string>();
+            JSON& boundaryCoordinate = side == "left" || side == "right"
+                                               ? pin["position"]["xNm"]
+                                               : pin["position"]["yNm"];
+            const int64_t boundary = side == "left" ? left
+                                   : side == "right" ? right
+                                   : side == "top" ? top
+                                                     : bottom;
+
+            if( boundaryCoordinate.get<int64_t>() != boundary )
+            {
+                boundaryCoordinate = boundary;
+                ++gridAdjustments;
+            }
+        }
+    }
+
+    for( JSON& component : sourceComponents )
+    {
+        if( !component.is_object() || !component.contains( "units" )
+            || !component["units"].is_array() )
+        {
+            continue;
+        }
+
+        for( JSON& unit : component["units"] )
+        {
+            if( unit.is_object() && unit.contains( "position" ) )
+                snapPoint( unit["position"] );
+        }
+    }
+
+    for( JSON& drawing : sourceDrawings )
+    {
+        if( !drawing.is_object() || !drawing.contains( "kind" )
+            || !drawing["kind"].is_string() )
+        {
+            continue;
+        }
+
+        const std::string kind = drawing["kind"].get<std::string>();
+
+        if( kind == "wire" || kind == "bus" || kind == "bus_entry" )
+        {
+            if( drawing.contains( "from" ) )
+                snapPoint( drawing["from"] );
+
+            if( drawing.contains( "to" ) )
+                snapPoint( drawing["to"] );
+        }
+        else if( kind == "junction" || kind == "label" || kind == "directive" )
+        {
+            if( drawing.contains( "position" ) )
+                snapPoint( drawing["position"] );
+        }
+    }
+
+    result.counts["gridAdjustments"] = gridAdjustments;
 
     if( sourceSheets.empty() )
     {
@@ -2821,6 +2992,230 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
         drawingsBySheet[drawingSheet].push_back( std::move( planned ) );
     }
 
+    struct AXIS_SEGMENT
+    {
+        int64_t x1;
+        int64_t y1;
+        int64_t x2;
+        int64_t y2;
+    };
+
+    struct ROUTED_SEGMENT
+    {
+        std::string  net;
+        AXIS_SEGMENT segment;
+    };
+
+    struct NET_ENDPOINT
+    {
+        std::string net;
+        std::string identity;
+        PIN_POINT   point;
+    };
+
+    struct ROUTE_CONFLICT
+    {
+        enum class KIND
+        {
+            ENDPOINT,
+            ENDPOINT_ESCAPE,
+            SEGMENT
+        };
+
+        KIND         kind = KIND::ENDPOINT;
+        std::string  net;
+        std::string  identity;
+        PIN_POINT    endpoint;
+        AXIS_SEGMENT segment = {};
+    };
+
+    enum class NET_NAME_SCOPE
+    {
+        NONE,
+        LOCAL,
+        GLOBAL
+    };
+
+    std::map<std::string, std::vector<ROUTED_SEGMENT>> routedSegmentsBySheet;
+    std::map<std::string, std::vector<NET_ENDPOINT>> netEndpointsBySheet;
+
+    for( const JSON& net : sourceNets )
+    {
+        const std::string netName = net.value( "name", "" );
+
+        for( const JSON& endpointJson : net.value( "pins", JSON::array() ) )
+        {
+            if( !endpointJson.is_object() || !endpointJson.contains( "component" )
+                || !endpointJson["component"].is_string() || !endpointJson.contains( "unit" )
+                || !endpointJson["unit"].is_number_integer()
+                || !endpointJson.contains( "number" ) || !endpointJson["number"].is_string() )
+            {
+                continue;
+            }
+
+            const std::string endpoint = endpointJson["component"].get<std::string>() + "/"
+                                         + std::to_string( endpointJson["unit"].get<int>() )
+                                         + "/" + endpointJson["number"].get<std::string>();
+            auto positions = endpointPositions.find( endpoint );
+
+            if( positions == endpointPositions.end() )
+                continue;
+
+            for( const PIN_POINT& point : positions->second )
+                netEndpointsBySheet[point.sheet].push_back( { netName, endpoint, point } );
+        }
+    }
+
+    const auto segmentsElectricallyTouch = []( const AXIS_SEGMENT& aFirst,
+                                                const AXIS_SEGMENT& aSecond )
+    {
+        const bool firstHorizontal = aFirst.y1 == aFirst.y2;
+        const bool secondHorizontal = aSecond.y1 == aSecond.y2;
+
+        if( firstHorizontal == secondHorizontal )
+        {
+            if( firstHorizontal && aFirst.y1 != aSecond.y1 )
+                return false;
+
+            if( !firstHorizontal && aFirst.x1 != aSecond.x1 )
+                return false;
+
+            const auto firstRange = firstHorizontal ? std::minmax( aFirst.x1, aFirst.x2 )
+                                                    : std::minmax( aFirst.y1, aFirst.y2 );
+            const auto secondRange = secondHorizontal ? std::minmax( aSecond.x1, aSecond.x2 )
+                                                      : std::minmax( aSecond.y1, aSecond.y2 );
+            return std::max( firstRange.first, secondRange.first )
+                   <= std::min( firstRange.second, secondRange.second );
+        }
+
+        const AXIS_SEGMENT& horizontal = firstHorizontal ? aFirst : aSecond;
+        const AXIS_SEGMENT& vertical = firstHorizontal ? aSecond : aFirst;
+        const auto horizontalRange = std::minmax( horizontal.x1, horizontal.x2 );
+        const auto verticalRange = std::minmax( vertical.y1, vertical.y2 );
+        const int64_t crossX = vertical.x1;
+        const int64_t crossY = horizontal.y1;
+
+        if( crossX < horizontalRange.first || crossX > horizontalRange.second
+            || crossY < verticalRange.first || crossY > verticalRange.second )
+        {
+            return false;
+        }
+
+        // KiCad's schematic connectivity is geometric: an orthogonal crossing can join even
+        // when neither segment ends at the crossing and no explicit junction was authored.
+        // Different KDS nets therefore may not intersect at all.
+        return true;
+    };
+    const auto pointOnSegment = []( const PIN_POINT& aPoint, const AXIS_SEGMENT& aSegment )
+    {
+        if( aSegment.y1 == aSegment.y2 )
+        {
+            const auto range = std::minmax( aSegment.x1, aSegment.x2 );
+            return aPoint.y == aSegment.y1 && aPoint.x >= range.first
+                   && aPoint.x <= range.second;
+        }
+
+        const auto range = std::minmax( aSegment.y1, aSegment.y2 );
+        return aPoint.x == aSegment.x1 && aPoint.y >= range.first
+               && aPoint.y <= range.second;
+    };
+    const auto findRouteConflict =
+            [&]( const std::string& aSheet, const std::string& aNet,
+                 const std::vector<AXIS_SEGMENT>& aSegments ) -> std::optional<ROUTE_CONFLICT>
+    {
+        const auto endpointSet = netEndpointsBySheet.find( aSheet );
+
+        if( endpointSet != netEndpointsBySheet.end() )
+        {
+            for( const AXIS_SEGMENT& candidate : aSegments )
+            {
+                for( const NET_ENDPOINT& endpoint : endpointSet->second )
+                {
+                    if( endpoint.net != aNet && pointOnSegment( endpoint.point, candidate ) )
+                    {
+                        return ROUTE_CONFLICT{
+                            ROUTE_CONFLICT::KIND::ENDPOINT,
+                            endpoint.net,
+                            endpoint.identity,
+                            endpoint.point,
+                            {}
+                        };
+                    }
+
+                    if( endpoint.net != aNet )
+                    {
+                        const int64_t escapeX =
+                                endpoint.point.x
+                                + ( endpoint.point.labelRotation == 0
+                                            ? SCHEMATIC_CONNECTION_GRID_NM
+                                    : endpoint.point.labelRotation == 180
+                                            ? -SCHEMATIC_CONNECTION_GRID_NM
+                                            : 0 );
+                        const int64_t escapeY =
+                                endpoint.point.y
+                                + ( endpoint.point.labelRotation == 90
+                                            ? SCHEMATIC_CONNECTION_GRID_NM
+                                    : endpoint.point.labelRotation == 270
+                                            ? -SCHEMATIC_CONNECTION_GRID_NM
+                                            : 0 );
+                        const AXIS_SEGMENT escape = {
+                            endpoint.point.x, endpoint.point.y, escapeX, escapeY
+                        };
+
+                        if( segmentsElectricallyTouch( candidate, escape ) )
+                        {
+                            return ROUTE_CONFLICT{
+                                ROUTE_CONFLICT::KIND::ENDPOINT_ESCAPE,
+                                endpoint.net,
+                                endpoint.identity,
+                                endpoint.point,
+                                escape
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        const auto existing = routedSegmentsBySheet.find( aSheet );
+
+        if( existing == routedSegmentsBySheet.end() )
+            return std::nullopt;
+
+        for( const AXIS_SEGMENT& candidate : aSegments )
+        {
+            for( const ROUTED_SEGMENT& routed : existing->second )
+            {
+                if( routed.net != aNet
+                    && segmentsElectricallyTouch( candidate, routed.segment ) )
+                {
+                    return ROUTE_CONFLICT{
+                        ROUTE_CONFLICT::KIND::SEGMENT,
+                        routed.net,
+                        {},
+                        {},
+                        routed.segment
+                    };
+                }
+            }
+        }
+
+        return std::nullopt;
+    };
+    const auto routeConflicts = [&]( const std::string& aSheet, const std::string& aNet,
+                                     const std::vector<AXIS_SEGMENT>& aSegments )
+    {
+        return findRouteConflict( aSheet, aNet, aSegments ).has_value();
+    };
+    const auto commitRoute = [&]( const std::string& aSheet, const std::string& aNet,
+                                  const std::vector<AXIS_SEGMENT>& aSegments )
+    {
+        auto& routed = routedSegmentsBySheet[aSheet];
+
+        for( const AXIS_SEGMENT& segment : aSegments )
+            routed.push_back( { aNet, segment } );
+    };
+
     const auto addEndpoint = [&]( const JSON& aEndpoint, const std::string& aNetName,
                                   bool aNoConnect )
     {
@@ -2878,22 +3273,512 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
         }
     };
 
-    struct AXIS_SEGMENT
-    {
-        int64_t x1;
-        int64_t y1;
-        int64_t x2;
-        int64_t y2;
-    };
-
     std::map<std::string, std::set<int64_t>> reservedVerticalLanes;
     std::map<std::string, std::set<int64_t>> reservedHorizontalLanes;
 
-    const auto addWiredNet = [&]( const JSON& aNet )
+    for( const auto& [ sheet, endpoints ] : netEndpointsBySheet )
+    {
+        for( const NET_ENDPOINT& endpoint : endpoints )
+        {
+            reservedVerticalLanes[sheet].insert( endpoint.point.x );
+            reservedHorizontalLanes[sheet].insert( endpoint.point.y );
+        }
+    }
+
+    constexpr int64_t GENERATED_ROUTE_LIMIT_NM = 2'000'000'000;
+    constexpr int64_t GENERATED_ROUTE_STEP_NM = 2'540'000;
+    const auto chooseFreeLane = [&]( int64_t aPreferred, const std::set<int64_t>& aReserved )
+    {
+        aPreferred = snapConnectionGrid( aPreferred );
+
+        for( size_t attempt = 0; attempt < 2048; ++attempt )
+        {
+            const int64_t offset = attempt == 0
+                                           ? 0
+                                           : static_cast<int64_t>( ( attempt + 1 ) / 2 )
+                                                     * GENERATED_ROUTE_STEP_NM
+                                                     * ( attempt % 2 == 1 ? 1 : -1 );
+            const int64_t candidate = aPreferred + offset;
+
+            if( candidate >= 0 && candidate <= GENERATED_ROUTE_LIMIT_NM
+                && !aReserved.contains( candidate ) )
+            {
+                return candidate;
+            }
+        }
+
+        return int64_t( -1 );
+    };
+    const auto routeConflictDescription = [&]( const ROUTE_CONFLICT& aConflict )
+    {
+        std::ostringstream message;
+        message << "blocking net " << aConflict.net;
+
+        if( aConflict.kind == ROUTE_CONFLICT::KIND::ENDPOINT
+            || aConflict.kind == ROUTE_CONFLICT::KIND::ENDPOINT_ESCAPE )
+        {
+            message << " endpoint " << aConflict.identity << " at ("
+                    << millimetres( aConflict.endpoint.x ) << " mm, "
+                    << millimetres( aConflict.endpoint.y ) << " mm)";
+
+            if( aConflict.kind == ROUTE_CONFLICT::KIND::ENDPOINT_ESCAPE )
+            {
+                message << " exit corridor to ("
+                        << millimetres( aConflict.segment.x2 ) << " mm, "
+                        << millimetres( aConflict.segment.y2 ) << " mm)";
+            }
+        }
+        else
+        {
+            message << " wire from (" << millimetres( aConflict.segment.x1 ) << " mm, "
+                    << millimetres( aConflict.segment.y1 ) << " mm) to ("
+                    << millimetres( aConflict.segment.x2 ) << " mm, "
+                    << millimetres( aConflict.segment.y2 ) << " mm)";
+        }
+
+        return message.str();
+    };
+    const auto findOrthogonalGridRoute =
+            [&]( const std::string& aSheet, const std::string& aNet,
+                 const PIN_POINT& aFirst, const PIN_POINT& aSecond,
+                 std::vector<AXIS_SEGMENT>& aRoute,
+                 std::optional<ROUTE_CONFLICT>& aBlockingConflict )
+    {
+        constexpr int GRID_DIRECTION_COUNT = 5;
+        constexpr int START_DIRECTION = 4;
+        constexpr size_t MAX_ROUTE_EXPANSIONS = 500'000;
+        constexpr std::array<int, 7> SEARCH_MARGINS = { 4, 10, 20, 40, 80, 160, 320 };
+        constexpr std::array<std::pair<int, int>, 4> DIRECTIONS = {
+            std::pair{ 1, 0 }, std::pair{ 0, 1 },
+            std::pair{ -1, 0 }, std::pair{ 0, -1 }
+        };
+        const int gridLimit = static_cast<int>(
+                GENERATED_ROUTE_LIMIT_NM / SCHEMATIC_CONNECTION_GRID_NM );
+        const auto outwardDirection = []( int aRotation )
+        {
+            if( aRotation == 0 )
+                return 0;
+
+            if( aRotation == 90 )
+                return 1;
+
+            if( aRotation == 180 )
+                return 2;
+
+            return 3;
+        };
+        const auto escapedPoint = [&]( const PIN_POINT& aPoint )
+        {
+            const auto [ deltaX, deltaY ] = DIRECTIONS[outwardDirection(
+                    aPoint.labelRotation )];
+            return std::pair{
+                aPoint.x + static_cast<int64_t>( deltaX )
+                                   * SCHEMATIC_CONNECTION_GRID_NM,
+                aPoint.y + static_cast<int64_t>( deltaY )
+                                   * SCHEMATIC_CONNECTION_GRID_NM
+            };
+        };
+        const auto [ firstEscapeX, firstEscapeY ] = escapedPoint( aFirst );
+        const auto [ secondEscapeX, secondEscapeY ] = escapedPoint( aSecond );
+
+        if( firstEscapeX < 0 || firstEscapeY < 0
+            || secondEscapeX < 0 || secondEscapeY < 0
+            || firstEscapeX > GENERATED_ROUTE_LIMIT_NM
+            || firstEscapeY > GENERATED_ROUTE_LIMIT_NM
+            || secondEscapeX > GENERATED_ROUTE_LIMIT_NM
+            || secondEscapeY > GENERATED_ROUTE_LIMIT_NM )
+        {
+            return false;
+        }
+
+        const std::vector<AXIS_SEGMENT> endpointEscapes = {
+            { aFirst.x, aFirst.y, firstEscapeX, firstEscapeY },
+            { secondEscapeX, secondEscapeY, aSecond.x, aSecond.y }
+        };
+
+        if( const std::optional<ROUTE_CONFLICT> conflict =
+                    findRouteConflict( aSheet, aNet, endpointEscapes ) )
+        {
+            aBlockingConflict = conflict;
+            return false;
+        }
+
+        const int startX = static_cast<int>(
+                firstEscapeX / SCHEMATIC_CONNECTION_GRID_NM );
+        const int startY = static_cast<int>(
+                firstEscapeY / SCHEMATIC_CONNECTION_GRID_NM );
+        const int goalX = static_cast<int>(
+                secondEscapeX / SCHEMATIC_CONNECTION_GRID_NM );
+        const int goalY = static_cast<int>(
+                secondEscapeY / SCHEMATIC_CONNECTION_GRID_NM );
+        const int startDirection = outwardDirection( aFirst.labelRotation );
+        const auto stateKey = [&]( int aX, int aY, int aDirection )
+        {
+            return ( ( static_cast<uint64_t>( aY )
+                       * static_cast<uint64_t>( gridLimit + 1 )
+                       + static_cast<uint64_t>( aX ) )
+                     * GRID_DIRECTION_COUNT )
+                   + static_cast<uint64_t>( aDirection );
+        };
+        const auto edgeKey = [&]( int aX, int aY, bool aVertical )
+        {
+            return ( ( static_cast<uint64_t>( aY )
+                       * static_cast<uint64_t>( gridLimit + 1 )
+                       + static_cast<uint64_t>( aX ) )
+                     * 2 )
+                   + static_cast<uint64_t>( aVertical );
+        };
+        const auto decodeState = [&]( uint64_t aKey )
+        {
+            const int direction = static_cast<int>( aKey % GRID_DIRECTION_COUNT );
+            const uint64_t cell = aKey / GRID_DIRECTION_COUNT;
+            const int x = static_cast<int>(
+                    cell % static_cast<uint64_t>( gridLimit + 1 ) );
+            const int y = static_cast<int>(
+                    cell / static_cast<uint64_t>( gridLimit + 1 ) );
+            return std::tuple{ x, y, direction };
+        };
+        std::unordered_map<uint64_t, size_t> blockedEdges;
+        std::unordered_set<uint64_t> forbiddenEndpointEdges;
+        std::vector<ROUTE_CONFLICT> blockingObjects;
+        const auto blockHorizontalEdge = [&]( int aX, int aY, size_t aBlocker )
+        {
+            if( aX >= 0 && aX < gridLimit && aY >= 0 && aY <= gridLimit )
+                blockedEdges.try_emplace( edgeKey( aX, aY, false ), aBlocker );
+        };
+        const auto blockVerticalEdge = [&]( int aX, int aY, size_t aBlocker )
+        {
+            if( aX >= 0 && aX <= gridLimit && aY >= 0 && aY < gridLimit )
+                blockedEdges.try_emplace( edgeKey( aX, aY, true ), aBlocker );
+        };
+        const auto blockPoint = [&]( int aX, int aY, size_t aBlocker )
+        {
+            blockHorizontalEdge( aX - 1, aY, aBlocker );
+            blockHorizontalEdge( aX, aY, aBlocker );
+            blockVerticalEdge( aX, aY - 1, aBlocker );
+            blockVerticalEdge( aX, aY, aBlocker );
+        };
+        const auto forbidEndpointPoint = [&]( int aX, int aY )
+        {
+            if( aX > 0 && aY >= 0 && aY <= gridLimit )
+                forbiddenEndpointEdges.emplace( edgeKey( aX - 1, aY, false ) );
+
+            if( aX >= 0 && aX < gridLimit && aY >= 0 && aY <= gridLimit )
+                forbiddenEndpointEdges.emplace( edgeKey( aX, aY, false ) );
+
+            if( aX >= 0 && aX <= gridLimit && aY > 0 )
+                forbiddenEndpointEdges.emplace( edgeKey( aX, aY - 1, true ) );
+
+            if( aX >= 0 && aX <= gridLimit && aY >= 0 && aY < gridLimit )
+                forbiddenEndpointEdges.emplace( edgeKey( aX, aY, true ) );
+        };
+        const auto blockSegment = [&]( const AXIS_SEGMENT& aSegment, size_t aBlocker )
+        {
+            const int x1 = static_cast<int>(
+                    aSegment.x1 / SCHEMATIC_CONNECTION_GRID_NM );
+            const int y1 = static_cast<int>(
+                    aSegment.y1 / SCHEMATIC_CONNECTION_GRID_NM );
+            const int x2 = static_cast<int>(
+                    aSegment.x2 / SCHEMATIC_CONNECTION_GRID_NM );
+            const int y2 = static_cast<int>(
+                    aSegment.y2 / SCHEMATIC_CONNECTION_GRID_NM );
+
+            if( y1 == y2 )
+            {
+                const auto [ minimumX, maximumX ] = std::minmax( x1, x2 );
+
+                for( int x = minimumX; x < maximumX; ++x )
+                    blockHorizontalEdge( x, y1, aBlocker );
+
+                for( int x = minimumX; x <= maximumX; ++x )
+                {
+                    blockVerticalEdge( x, y1 - 1, aBlocker );
+                    blockVerticalEdge( x, y1, aBlocker );
+                }
+            }
+            else
+            {
+                const auto [ minimumY, maximumY ] = std::minmax( y1, y2 );
+
+                for( int y = minimumY; y < maximumY; ++y )
+                    blockVerticalEdge( x1, y, aBlocker );
+
+                for( int y = minimumY; y <= maximumY; ++y )
+                {
+                    blockHorizontalEdge( x1 - 1, y, aBlocker );
+                    blockHorizontalEdge( x1, y, aBlocker );
+                }
+            }
+        };
+        const auto endpointSet = netEndpointsBySheet.find( aSheet );
+
+        if( endpointSet != netEndpointsBySheet.end() )
+        {
+            for( const NET_ENDPOINT& endpoint : endpointSet->second )
+            {
+                if( endpoint.net == aNet )
+                    continue;
+
+                const int x = static_cast<int>(
+                        endpoint.point.x / SCHEMATIC_CONNECTION_GRID_NM );
+                const int y = static_cast<int>(
+                        endpoint.point.y / SCHEMATIC_CONNECTION_GRID_NM );
+                const size_t endpointIndex = blockingObjects.size();
+                blockingObjects.push_back(
+                        { ROUTE_CONFLICT::KIND::ENDPOINT, endpoint.net,
+                          endpoint.identity, endpoint.point, {} } );
+                blockPoint( x, y, endpointIndex );
+                const int64_t escapeX =
+                        endpoint.point.x
+                        + ( endpoint.point.labelRotation == 0
+                                    ? SCHEMATIC_CONNECTION_GRID_NM
+                            : endpoint.point.labelRotation == 180
+                                    ? -SCHEMATIC_CONNECTION_GRID_NM
+                                    : 0 );
+                const int64_t escapeY =
+                        endpoint.point.y
+                        + ( endpoint.point.labelRotation == 90
+                                    ? SCHEMATIC_CONNECTION_GRID_NM
+                            : endpoint.point.labelRotation == 270
+                                    ? -SCHEMATIC_CONNECTION_GRID_NM
+                                    : 0 );
+                const AXIS_SEGMENT escape = {
+                    endpoint.point.x, endpoint.point.y, escapeX, escapeY
+                };
+                const size_t escapeIndex = blockingObjects.size();
+                blockingObjects.push_back(
+                        { ROUTE_CONFLICT::KIND::ENDPOINT_ESCAPE, endpoint.net,
+                          endpoint.identity, endpoint.point, escape } );
+                blockSegment( escape, escapeIndex );
+            }
+        }
+
+        const auto routedSet = routedSegmentsBySheet.find( aSheet );
+
+        if( routedSet != routedSegmentsBySheet.end() )
+        {
+            for( const ROUTED_SEGMENT& routed : routedSet->second )
+            {
+                if( routed.net == aNet )
+                    continue;
+
+                const size_t blockerIndex = blockingObjects.size();
+                blockingObjects.push_back(
+                        { ROUTE_CONFLICT::KIND::SEGMENT, routed.net, {}, {},
+                          routed.segment } );
+                blockSegment( routed.segment, blockerIndex );
+            }
+        }
+
+        forbidEndpointPoint(
+                static_cast<int>( aFirst.x / SCHEMATIC_CONNECTION_GRID_NM ),
+                static_cast<int>( aFirst.y / SCHEMATIC_CONNECTION_GRID_NM ) );
+        forbidEndpointPoint(
+                static_cast<int>( aSecond.x / SCHEMATIC_CONNECTION_GRID_NM ),
+                static_cast<int>( aSecond.y / SCHEMATIC_CONNECTION_GRID_NM ) );
+
+        int64_t closestBlockedDistance = std::numeric_limits<int64_t>::max();
+
+        for( const int margin : SEARCH_MARGINS )
+        {
+            const int minimumX = std::max( 0, std::min( startX, goalX ) - margin );
+            const int maximumX = std::min( gridLimit, std::max( startX, goalX ) + margin );
+            const int minimumY = std::max( 0, std::min( startY, goalY ) - margin );
+            const int maximumY = std::min( gridLimit, std::max( startY, goalY ) + margin );
+            using QUEUE_ITEM =
+                    std::tuple<int64_t, int64_t, int, int, int, uint64_t>;
+            std::priority_queue<QUEUE_ITEM, std::vector<QUEUE_ITEM>,
+                                std::greater<QUEUE_ITEM>> frontier;
+            std::unordered_map<uint64_t, int64_t> costs;
+            std::unordered_map<uint64_t, uint64_t> parents;
+            const uint64_t startKey = stateKey( startX, startY, startDirection );
+            const int64_t startEstimate =
+                    static_cast<int64_t>( std::abs( startX - goalX )
+                                          + std::abs( startY - goalY ) )
+                    * 10;
+            frontier.emplace( startEstimate, 0, startY, startX,
+                              startDirection, startKey );
+            costs.emplace( startKey, 0 );
+            uint64_t goalKey = 0;
+            bool found = false;
+            size_t expansions = 0;
+
+            while( !frontier.empty() && expansions < MAX_ROUTE_EXPANSIONS )
+            {
+                const auto [ estimatedCost, cost, y, x, previousDirection, key ] =
+                        frontier.top();
+                static_cast<void>( estimatedCost );
+                frontier.pop();
+                const auto known = costs.find( key );
+
+                if( known == costs.end() || known->second != cost )
+                    continue;
+
+                if( x == goalX && y == goalY )
+                {
+                    goalKey = key;
+                    found = true;
+                    break;
+                }
+
+                ++expansions;
+
+                for( int direction = 0; direction < 4; ++direction )
+                {
+                    const int nextX = x + DIRECTIONS[direction].first;
+                    const int nextY = y + DIRECTIONS[direction].second;
+
+                    if( nextX < minimumX || nextX > maximumX
+                        || nextY < minimumY || nextY > maximumY )
+                    {
+                        continue;
+                    }
+
+                    const bool vertical = x == nextX;
+                    const int edgeX = std::min( x, nextX );
+                    const int edgeY = std::min( y, nextY );
+                    const uint64_t candidateEdge =
+                            edgeKey( edgeX, edgeY, vertical );
+
+                    if( forbiddenEndpointEdges.contains( candidateEdge ) )
+                        continue;
+
+                    const auto blocked = blockedEdges.find( candidateEdge );
+
+                    if( blocked != blockedEdges.end() )
+                    {
+                        const int64_t distance =
+                                std::abs( nextX - goalX ) + std::abs( nextY - goalY );
+
+                        if( distance < closestBlockedDistance )
+                        {
+                            closestBlockedDistance = distance;
+                            aBlockingConflict = blockingObjects[blocked->second];
+                        }
+
+                        continue;
+                    }
+
+                    const int64_t nextCost =
+                            cost + 10 + ( previousDirection != START_DIRECTION
+                                         && previousDirection != direction ? 3 : 0 );
+                    const uint64_t nextKey = stateKey( nextX, nextY, direction );
+                    const auto existingCost = costs.find( nextKey );
+
+                    if( existingCost != costs.end() && existingCost->second <= nextCost )
+                        continue;
+
+                    costs[nextKey] = nextCost;
+                    parents[nextKey] = key;
+                    const int64_t estimate =
+                            nextCost
+                            + static_cast<int64_t>( std::abs( nextX - goalX )
+                                                    + std::abs( nextY - goalY ) )
+                                      * 10;
+                    frontier.emplace( estimate, nextCost, nextY, nextX,
+                                      direction, nextKey );
+                }
+            }
+
+            if( !found )
+                continue;
+
+            std::vector<std::pair<int64_t, int64_t>> path;
+            uint64_t cursor = goalKey;
+
+            while( true )
+            {
+                const auto [ x, y, direction ] = decodeState( cursor );
+                static_cast<void>( direction );
+                path.emplace_back(
+                        static_cast<int64_t>( x ) * SCHEMATIC_CONNECTION_GRID_NM,
+                        static_cast<int64_t>( y ) * SCHEMATIC_CONNECTION_GRID_NM );
+
+                if( cursor == startKey )
+                    break;
+
+                const auto parent = parents.find( cursor );
+
+                if( parent == parents.end() )
+                    return false;
+
+                cursor = parent->second;
+            }
+
+            std::reverse( path.begin(), path.end() );
+            path.insert( path.begin(), { aFirst.x, aFirst.y } );
+            path.push_back( { aSecond.x, aSecond.y } );
+            path.erase( std::unique( path.begin(), path.end() ), path.end() );
+            std::vector<AXIS_SEGMENT> candidate;
+
+            for( size_t index = 1; index < path.size(); ++index )
+            {
+                const auto [ fromX, fromY ] = path[index - 1];
+                const auto [ toX, toY ] = path[index];
+
+                if( fromX == toX && fromY == toY )
+                    continue;
+
+                if( !candidate.empty() )
+                {
+                    AXIS_SEGMENT& previous = candidate.back();
+                    const bool previousHorizontal = previous.y1 == previous.y2;
+                    const bool currentHorizontal = fromY == toY;
+
+                    if( previous.x2 == fromX && previous.y2 == fromY
+                        && previousHorizontal == currentHorizontal )
+                    {
+                        previous.x2 = toX;
+                        previous.y2 = toY;
+                        continue;
+                    }
+                }
+
+                candidate.push_back( { fromX, fromY, toX, toY } );
+            }
+
+            if( const std::optional<ROUTE_CONFLICT> conflict =
+                        findRouteConflict( aSheet, aNet, candidate ) )
+            {
+                aBlockingConflict = conflict;
+                continue;
+            }
+
+            aRoute = std::move( candidate );
+            return true;
+        }
+
+        return false;
+    };
+
+    const auto addWiredNet = [&]( const JSON& aNet, const std::string& aRoutePrefix,
+                                  NET_NAME_SCOPE aNameScope )
     {
         const std::string netName = aNet["name"].get<std::string>();
         std::vector<PIN_POINT> points;
         std::string sheet;
+
+        const auto emitNameLabel = [&]( const PIN_POINT& aPoint,
+                                        const std::string& aLogicalId,
+                                        NET_NAME_SCOPE aScope )
+        {
+            if( aScope == NET_NAME_SCOPE::NONE )
+                return;
+
+            const bool global = aScope == NET_NAME_SCOPE::GLOBAL;
+            const std::string kind = global ? "global_label" : "label";
+            const std::string uuid = stableUuid( project, "schematic_" + kind, aLogicalId );
+            const std::string source = global
+                                               ? globalLabelExpression(
+                                                         netName, aPoint.x, aPoint.y,
+                                                         aPoint.labelRotation, uuid )
+                                               : localLabelExpression(
+                                                         netName, aPoint.x, aPoint.y,
+                                                         aPoint.labelRotation, uuid );
+            connectivityBySheet[sheet].push_back(
+                    { { "kind", kind }, { "logicalId", aLogicalId }, { "uuid", uuid },
+                      { "source", source } } );
+        };
 
         for( const JSON& endpointJson : aNet["pins"] )
         {
@@ -2955,9 +3840,7 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
                                            ? horizontalPins > verticalPins
                                            : maxX - minX >= maxY - minY;
         constexpr int64_t STUB_LENGTH_NM = 5'080'000;
-        constexpr int64_t DETOUR_STEP_NM = 2'540'000;
-        constexpr int64_t LABEL_INSET_MAX_NM = 10'160'000;
-        constexpr int64_t CONNECTION_GRID_NM = 1'270'000;
+        constexpr int64_t DETOUR_STEP_NM = GENERATED_ROUTE_STEP_NM;
 
         const auto chooseTrunk = [&]( bool aVertical )
         {
@@ -2974,6 +3857,9 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
 
             for( const PIN_POINT& point : points )
                 candidates.push_back( aVertical ? point.x : point.y );
+
+            for( int64_t& candidate : candidates )
+                candidate = snapConnectionGrid( candidate );
 
             std::sort( candidates.begin(), candidates.end() );
             candidates.erase( std::unique( candidates.begin(), candidates.end() ),
@@ -3014,7 +3900,23 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
             return best;
         };
 
-        const int64_t trunk = chooseTrunk( verticalTrunk );
+        int64_t trunk = -1;
+
+        if( points.size() > 2 )
+        {
+            auto& trunkLanes = verticalTrunk ? reservedVerticalLanes[sheet]
+                                             : reservedHorizontalLanes[sheet];
+            trunk = chooseFreeLane( chooseTrunk( verticalTrunk ), trunkLanes );
+
+            if( trunk < 0 )
+            {
+                diagnostic( result, "schematic_route_space_exhausted",
+                            "net " + netName
+                                    + " cannot allocate an isolated schematic routing lane" );
+                return;
+            }
+
+        }
         std::vector<AXIS_SEGMENT> rawSegments;
         std::vector<int64_t> attachments;
 
@@ -3042,7 +3944,82 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
 
             if( first.x == second.x || first.y == second.y )
             {
-                appendSegment( first.x, first.y, second.x, second.y );
+                const AXIS_SEGMENT direct = { first.x, first.y, second.x, second.y };
+
+                if( !routeConflicts( sheet, netName, { direct } ) )
+                {
+                    appendSegment( first.x, first.y, second.x, second.y );
+                }
+                else
+                {
+                    const bool horizontal = first.y == second.y;
+                    auto& reserved = horizontal ? reservedHorizontalLanes[sheet]
+                                                : reservedVerticalLanes[sheet];
+                    int64_t lane = -1;
+                    std::set<int64_t> rejectedLanes = reserved;
+                    std::vector<AXIS_SEGMENT> detour;
+
+                    for( size_t attempt = 1; attempt < 2048; ++attempt )
+                    {
+                        const int64_t preferred = ( horizontal ? first.y : first.x )
+                                                  + ( attempt % 2 == 1 ? 1 : -1 )
+                                                            * static_cast<int64_t>( ( attempt + 1 ) / 2 )
+                                                            * DETOUR_STEP_NM;
+                        lane = chooseFreeLane( preferred, rejectedLanes );
+
+                        if( lane < 0 )
+                            break;
+
+                        detour = horizontal
+                                         ? std::vector<AXIS_SEGMENT>{
+                                                   { first.x, first.y, first.x, lane },
+                                                   { first.x, lane, second.x, lane },
+                                                   { second.x, lane, second.x, second.y } }
+                                         : std::vector<AXIS_SEGMENT>{
+                                                   { first.x, first.y, lane, first.y },
+                                                   { lane, first.y, lane, second.y },
+                                                   { lane, second.y, second.x, second.y } };
+
+                        if( !routeConflicts( sheet, netName, detour ) )
+                            break;
+
+                        rejectedLanes.insert( lane );
+                        lane = -1;
+                    }
+
+                    if( lane < 0 )
+                    {
+                        std::optional<ROUTE_CONFLICT> blockingConflict;
+
+                        if( !findOrthogonalGridRoute( sheet, netName, first, second,
+                                                      rawSegments, blockingConflict ) )
+                        {
+                            std::ostringstream message;
+                            message << "net " << netName << " on sheet " << sheet
+                                    << " cannot route from ("
+                                    << millimetres( first.x ) << " mm, "
+                                    << millimetres( first.y ) << " mm) to ("
+                                    << millimetres( second.x ) << " mm, "
+                                    << millimetres( second.y ) << " mm)";
+
+                            if( blockingConflict )
+                                message << "; "
+                                        << routeConflictDescription( *blockingConflict );
+
+                            diagnostic( result, "schematic_route_space_exhausted",
+                                        message.str() );
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        reserved.insert( lane );
+
+                        for( const AXIS_SEGMENT& segment : detour )
+                            appendSegment( segment.x1, segment.y1,
+                                           segment.x2, segment.y2 );
+                    }
+                }
             }
             else
             {
@@ -3053,34 +4030,67 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
                                                  : reservedHorizontalLanes[sheet];
                 const int64_t firstCoordinate = useVerticalLane ? first.x : first.y;
                 const int64_t secondCoordinate = useVerticalLane ? second.x : second.y;
-                const int64_t base = firstCoordinate
-                                     + ( secondCoordinate - firstCoordinate ) / 2;
-                int64_t lane = base;
+                const int64_t base = snapConnectionGrid(
+                        firstCoordinate + ( secondCoordinate - firstCoordinate ) / 2 );
+                int64_t lane = -1;
+                std::set<int64_t> rejectedLanes = reserved;
+                std::vector<AXIS_SEGMENT> candidate;
 
-                for( size_t attempt = 0; reserved.contains( lane ); ++attempt )
+                for( size_t attempt = 0; attempt < 2048; ++attempt )
                 {
-                    const int64_t magnitude = static_cast<int64_t>( attempt / 2 + 1 )
-                                              * DETOUR_STEP_NM;
-                    const int64_t candidate = base + ( attempt % 2 == 0 ? magnitude
-                                                                        : -magnitude );
+                    lane = chooseFreeLane( base, rejectedLanes );
 
-                    if( candidate >= 0 && candidate <= 2'000'000'000 )
-                        lane = candidate;
+                    if( lane < 0 )
+                        break;
+
+                    candidate = useVerticalLane
+                                      ? std::vector<AXIS_SEGMENT>{
+                                                { first.x, first.y, lane, first.y },
+                                                { lane, first.y, lane, second.y },
+                                                { lane, second.y, second.x, second.y } }
+                                      : std::vector<AXIS_SEGMENT>{
+                                                { first.x, first.y, first.x, lane },
+                                                { first.x, lane, second.x, lane },
+                                                { second.x, lane, second.x, second.y } };
+
+                    if( !routeConflicts( sheet, netName, candidate ) )
+                        break;
+
+                    rejectedLanes.insert( lane );
+                    lane = -1;
                 }
 
-                reserved.insert( lane );
-
-                if( useVerticalLane )
+                if( lane < 0 )
                 {
-                    appendSegment( first.x, first.y, lane, first.y );
-                    appendSegment( lane, first.y, lane, second.y );
-                    appendSegment( lane, second.y, second.x, second.y );
+                    std::optional<ROUTE_CONFLICT> blockingConflict;
+
+                    if( !findOrthogonalGridRoute( sheet, netName, first, second,
+                                                  rawSegments, blockingConflict ) )
+                    {
+                        std::ostringstream message;
+                        message << "net " << netName << " on sheet " << sheet
+                                << " cannot route from ("
+                                << millimetres( first.x ) << " mm, "
+                                << millimetres( first.y ) << " mm) to ("
+                                << millimetres( second.x ) << " mm, "
+                                << millimetres( second.y ) << " mm)";
+
+                        if( blockingConflict )
+                            message << "; "
+                                    << routeConflictDescription( *blockingConflict );
+
+                        diagnostic( result, "schematic_route_space_exhausted",
+                                    message.str() );
+                        return;
+                    }
                 }
                 else
                 {
-                    appendSegment( first.x, first.y, first.x, lane );
-                    appendSegment( first.x, lane, second.x, lane );
-                    appendSegment( second.x, lane, second.x, second.y );
+                    reserved.insert( lane );
+
+                    for( const AXIS_SEGMENT& segment : candidate )
+                        appendSegment( segment.x1, segment.y1,
+                                       segment.x2, segment.y2 );
                 }
             }
         }
@@ -3098,8 +4108,20 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
                     {
                         // Rotation 90 points outward-up, which is -y in sheet coordinates.
                         const int64_t direction = point.labelRotation == 90 ? -1 : 1;
-                        attachY = std::clamp( point.y + direction * STUB_LENGTH_NM,
-                                              int64_t( 0 ), int64_t( 2'000'000'000 ) );
+                        attachY = chooseFreeLane(
+                                std::clamp( point.y + direction * STUB_LENGTH_NM,
+                                            int64_t( 0 ), GENERATED_ROUTE_LIMIT_NM ),
+                                reservedHorizontalLanes[sheet] );
+
+                        if( attachY < 0 )
+                        {
+                            diagnostic( result, "schematic_route_space_exhausted",
+                                        "net " + netName
+                                                + " cannot allocate a horizontal attachment" );
+                            return;
+                        }
+
+
                         appendSegment( point.x, point.y, point.x, attachY );
                         appendSegment( point.x, attachY, trunk, attachY );
                     }
@@ -3120,11 +4142,21 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
                                     point.x + direction * STUB_LENGTH_NM,
                                     int64_t( 0 ), int64_t( 2'000'000'000 ) );
                             const int64_t detourDirection = index % 2 == 0 ? 1 : -1;
-                            attachY = std::clamp(
-                                    point.y + detourDirection
-                                                      * static_cast<int64_t>( index + 1 )
-                                                      * DETOUR_STEP_NM,
-                                    int64_t( 0 ), int64_t( 2'000'000'000 ) );
+                            attachY = chooseFreeLane(
+                                    std::clamp( point.y + detourDirection
+                                                              * static_cast<int64_t>( index + 1 )
+                                                              * DETOUR_STEP_NM,
+                                                int64_t( 0 ), GENERATED_ROUTE_LIMIT_NM ),
+                                    reservedHorizontalLanes[sheet] );
+
+                            if( attachY < 0 )
+                            {
+                                diagnostic( result, "schematic_route_space_exhausted",
+                                            "net " + netName
+                                                    + " cannot allocate a horizontal detour" );
+                                return;
+                            }
+
                             appendSegment( point.x, point.y, stubX, point.y );
                             appendSegment( stubX, point.y, stubX, attachY );
                             appendSegment( stubX, attachY, trunk, attachY );
@@ -3140,8 +4172,19 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
                     if( point.labelRotation == 0 || point.labelRotation == 180 )
                     {
                         const int64_t direction = point.labelRotation == 0 ? 1 : -1;
-                        attachX = std::clamp( point.x + direction * STUB_LENGTH_NM,
-                                              int64_t( 0 ), int64_t( 2'000'000'000 ) );
+                        attachX = chooseFreeLane(
+                                std::clamp( point.x + direction * STUB_LENGTH_NM,
+                                            int64_t( 0 ), GENERATED_ROUTE_LIMIT_NM ),
+                                reservedVerticalLanes[sheet] );
+
+                        if( attachX < 0 )
+                        {
+                            diagnostic( result, "schematic_route_space_exhausted",
+                                        "net " + netName
+                                                + " cannot allocate a vertical attachment" );
+                            return;
+                        }
+
                         appendSegment( point.x, point.y, attachX, point.y );
                         appendSegment( attachX, point.y, attachX, trunk );
                     }
@@ -3162,11 +4205,21 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
                                     point.y + direction * STUB_LENGTH_NM,
                                     int64_t( 0 ), int64_t( 2'000'000'000 ) );
                             const int64_t detourDirection = index % 2 == 0 ? 1 : -1;
-                            attachX = std::clamp(
-                                    point.x + detourDirection
-                                                      * static_cast<int64_t>( index + 1 )
-                                                      * DETOUR_STEP_NM,
-                                    int64_t( 0 ), int64_t( 2'000'000'000 ) );
+                            attachX = chooseFreeLane(
+                                    std::clamp( point.x + detourDirection
+                                                              * static_cast<int64_t>( index + 1 )
+                                                              * DETOUR_STEP_NM,
+                                                int64_t( 0 ), GENERATED_ROUTE_LIMIT_NM ),
+                                    reservedVerticalLanes[sheet] );
+
+                            if( attachX < 0 )
+                            {
+                                diagnostic( result, "schematic_route_space_exhausted",
+                                            "net " + netName
+                                                    + " cannot allocate a vertical detour" );
+                                return;
+                            }
+
                             appendSegment( point.x, point.y, point.x, stubY );
                             appendSegment( point.x, stubY, attachX, stubY );
                             appendSegment( attachX, stubY, attachX, trunk );
@@ -3184,6 +4237,111 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
                 appendSegment( trunk, *attachmentMin, trunk, *attachmentMax );
             else
                 appendSegment( *attachmentMin, trunk, *attachmentMax, trunk );
+        }
+
+        bool routeCollision = routeConflicts( sheet, netName, rawSegments );
+
+        if( routeCollision && points.size() > 2 )
+        {
+            // Retry a multi-pin net as an isolated comb.  Moving the trunk outside a neighboring
+            // route often turns an unavoidable-looking crossing into a simple readable path.
+            auto& trunkLanes = verticalTrunk ? reservedVerticalLanes[sheet]
+                                             : reservedHorizontalLanes[sheet];
+            std::set<int64_t> rejectedTrunks = trunkLanes;
+            rejectedTrunks.insert( trunk );
+            const int64_t preferredTrunk = chooseTrunk( verticalTrunk );
+
+            for( size_t attempt = 0; attempt < 2048 && routeCollision; ++attempt )
+            {
+                const int64_t candidateTrunk = chooseFreeLane( preferredTrunk,
+                                                                rejectedTrunks );
+
+                if( candidateTrunk < 0 )
+                    break;
+
+                std::vector<AXIS_SEGMENT> candidateSegments;
+                std::vector<int64_t> candidateAttachments;
+                const auto appendCandidate = [&]( int64_t aX1, int64_t aY1,
+                                                  int64_t aX2, int64_t aY2 )
+                {
+                    if( aX1 != aX2 || aY1 != aY2 )
+                        candidateSegments.push_back( { aX1, aY1, aX2, aY2 } );
+                };
+
+                for( const PIN_POINT& point : points )
+                {
+                    if( verticalTrunk )
+                    {
+                        appendCandidate( point.x, point.y, candidateTrunk, point.y );
+                        candidateAttachments.push_back( point.y );
+                    }
+                    else
+                    {
+                        appendCandidate( point.x, point.y, point.x, candidateTrunk );
+                        candidateAttachments.push_back( point.x );
+                    }
+                }
+
+                const auto [ attachmentMin, attachmentMax ] =
+                        std::minmax_element( candidateAttachments.begin(),
+                                             candidateAttachments.end() );
+
+                if( verticalTrunk )
+                {
+                    appendCandidate( candidateTrunk, *attachmentMin,
+                                     candidateTrunk, *attachmentMax );
+                }
+                else
+                {
+                    appendCandidate( *attachmentMin, candidateTrunk,
+                                     *attachmentMax, candidateTrunk );
+                }
+
+                routeCollision = routeConflicts( sheet, netName, candidateSegments );
+
+                if( !routeCollision )
+                {
+                    trunk = candidateTrunk;
+                    rawSegments = std::move( candidateSegments );
+                    attachments = std::move( candidateAttachments );
+                    break;
+                }
+
+                rejectedTrunks.insert( candidateTrunk );
+            }
+        }
+
+        if( routeCollision )
+        {
+            // Some valid schematics are non-planar on a single page.  Never force a wire
+            // through another net.  The fallback may change presentation, but it must never
+            // change the net's electrical naming scope: same-sheet/global routes still need the
+            // exact PCB-facing name, while subordinate hierarchy pages remain sheet-local.
+            const NET_NAME_SCOPE fallbackScope = aNameScope == NET_NAME_SCOPE::GLOBAL
+                                                         ? NET_NAME_SCOPE::GLOBAL
+                                                         : NET_NAME_SCOPE::LOCAL;
+
+            for( size_t index = 0; index < points.size(); ++index )
+            {
+                const PIN_POINT& point = points[index];
+                const std::string logicalId = "net_isolated_label/" + aRoutePrefix + "/"
+                                              + std::to_string( index );
+                emitNameLabel( point, logicalId, fallbackScope );
+            }
+
+            result.counts["isolatedLabelFallbacks"] =
+                    result.counts["isolatedLabelFallbacks"].get<size_t>() + 1;
+            return;
+        }
+
+        commitRoute( sheet, netName, rawSegments );
+
+        for( const AXIS_SEGMENT& segment : rawSegments )
+        {
+            if( segment.y1 == segment.y2 )
+                reservedHorizontalLanes[sheet].insert( segment.y1 );
+            else
+                reservedVerticalLanes[sheet].insert( segment.x1 );
         }
 
         using AXIS_KEY = std::pair<char, int64_t>;
@@ -3208,46 +4366,13 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
         }
 
         std::array<PIN_POINT, 2> nameAnchors = { points.front(), points.back() };
+        const size_t labelCount = aNameScope == NET_NAME_SCOPE::NONE ? 0
+                                                                      : 1;
 
-        for( PIN_POINT& anchor : nameAnchors )
+        for( size_t anchorNumber = 0; anchorNumber < labelCount; ++anchorNumber )
         {
-            for( const AXIS_SEGMENT& segment : rawSegments )
-            {
-                int64_t otherX = 0;
-                int64_t otherY = 0;
-
-                if( segment.x1 == anchor.x && segment.y1 == anchor.y )
-                {
-                    otherX = segment.x2;
-                    otherY = segment.y2;
-                }
-                else if( segment.x2 == anchor.x && segment.y2 == anchor.y )
-                {
-                    otherX = segment.x1;
-                    otherY = segment.y1;
-                }
-                else
-                {
-                    continue;
-                }
-
-                const int64_t length = std::abs( otherX - anchor.x )
-                                       + std::abs( otherY - anchor.y );
-                const int64_t desiredInset = std::min( LABEL_INSET_MAX_NM, length / 3 );
-                const int64_t inset = desiredInset / CONNECTION_GRID_NM
-                                      * CONNECTION_GRID_NM;
-
-                if( inset == 0 )
-                    break;
-
-                if( otherX != anchor.x )
-                    anchor.x += otherX > anchor.x ? inset : -inset;
-                else
-                    anchor.y += otherY > anchor.y ? inset : -inset;
-
-                protectedNodes.emplace( anchor.x, anchor.y );
-                break;
-            }
+            PIN_POINT& anchor = nameAnchors[anchorNumber];
+            protectedNodes.emplace( anchor.x, anchor.y );
         }
 
         size_t wireIndex = 0;
@@ -3293,7 +4418,7 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
                                     { "yNm", horizontal ? axis.second : cuts[cut] } } },
                         { "stroke", { { "widthNm", 0 }, { "lineStyle", "default" } } }
                     };
-                    const std::string logicalId = "net_wire/" + netName + "/"
+                    const std::string logicalId = "net_wire/" + aRoutePrefix + "/"
                                                   + std::to_string( wireIndex++ );
                     const std::string uuid =
                             stableUuid( project, "schematic_wire", logicalId );
@@ -3323,7 +4448,7 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
 
                     const int64_t x = verticalTrunk ? trunk : attachment;
                     const int64_t y = verticalTrunk ? attachment : trunk;
-                    const std::string logicalId = "net_junction/" + netName + "/"
+                    const std::string logicalId = "net_junction/" + aRoutePrefix + "/"
                                                   + std::to_string( x ) + "/"
                                                   + std::to_string( y );
                     const std::string uuid =
@@ -3342,20 +4467,390 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
             }
         }
 
-        for( size_t anchorNumber = 0; anchorNumber < nameAnchors.size(); ++anchorNumber )
+        for( size_t anchorNumber = 0; anchorNumber < labelCount; ++anchorNumber )
         {
             const PIN_POINT& nameAnchor = nameAnchors[anchorNumber];
-            const std::string labelLogicalId = "net_name/" + netName + "/"
+            const std::string labelLogicalId = "net_name/" + aRoutePrefix + "/"
                                                + std::to_string( anchorNumber );
-            const std::string labelUuid =
-                    stableUuid( project, "schematic_global_label", labelLogicalId );
-            connectivityBySheet[sheet].push_back(
-                    { { "kind", "global_label" }, { "logicalId", labelLogicalId },
-                      { "uuid", labelUuid },
-                      { "source", globalLabelExpression(
-                                          netName, nameAnchor.x, nameAnchor.y,
-                                          nameAnchor.labelRotation, labelUuid ) } } );
+            emitNameLabel( nameAnchor, labelLogicalId, aNameScope );
         }
+    };
+
+    std::map<std::string, std::map<std::string, std::vector<PIN_POINT>>>
+            automaticNetPoints;
+    std::map<std::string, std::set<std::string>> automaticInterfaceNets;
+    std::map<std::string, std::map<std::string, PIN_POINT>> childInterfacePositions;
+
+    const auto isInSubtree = [&]( const std::string& aCandidate,
+                                  const std::string& aAncestor )
+    {
+        std::string cursor = aCandidate;
+
+        while( true )
+        {
+            if( cursor == aAncestor )
+                return true;
+
+            const JSON& cursorSheet = sheets.at( cursor );
+
+            if( cursorSheet["parent"].is_null() )
+                return false;
+
+            cursor = cursorSheet["parent"].get<std::string>();
+        }
+    };
+
+    for( const JSON& net : sourceNets )
+    {
+        const std::string presentation = net.value( "presentation", "auto" );
+
+        if( presentation != "auto" && presentation != "hierarchical"
+            && presentation != "wired" )
+            continue;
+
+        const std::string netName = net.value( "name", "" );
+        std::set<std::string> endpointSheets;
+
+        for( const JSON& endpointJson : net.value( "pins", JSON::array() ) )
+        {
+            if( !endpointJson.is_object() || !endpointJson.contains( "component" )
+                || !endpointJson["component"].is_string() || !endpointJson.contains( "unit" )
+                || !endpointJson["unit"].is_number_integer()
+                || !endpointJson.contains( "number" ) || !endpointJson["number"].is_string() )
+            {
+                continue;
+            }
+
+            const std::string endpoint = endpointJson["component"].get<std::string>() + "/"
+                                         + std::to_string( endpointJson["unit"].get<int>() )
+                                         + "/" + endpointJson["number"].get<std::string>();
+            auto positions = endpointPositions.find( endpoint );
+
+            if( positions == endpointPositions.end() || positions->second.empty() )
+            {
+                diagnostic( result, "unresolved_schematic_pin",
+                            "schematic endpoint " + endpoint
+                                    + " does not resolve to a native symbol pin" );
+                continue;
+            }
+
+            for( const PIN_POINT& point : positions->second )
+            {
+                endpointSheets.emplace( point.sheet );
+                automaticNetPoints[netName][point.sheet].push_back( point );
+            }
+        }
+
+        if( endpointSheets.size() < 2 )
+            continue;
+
+        for( const std::string& sheetId : orderedIds )
+        {
+            if( sheetId == rootId )
+                continue;
+
+            const bool inside = std::any_of(
+                    endpointSheets.begin(), endpointSheets.end(),
+                    [&]( const std::string& aEndpointSheet )
+                    {
+                        return isInSubtree( aEndpointSheet, sheetId );
+                    } );
+            const bool outside = std::any_of(
+                    endpointSheets.begin(), endpointSheets.end(),
+                    [&]( const std::string& aEndpointSheet )
+                    {
+                        return !isInSubtree( aEndpointSheet, sheetId );
+                    } );
+
+            if( inside && outside )
+                automaticInterfaceNets[sheetId].emplace( netName );
+        }
+    }
+
+    // Allocate deterministic sheet-edge positions for inferred hierarchy interfaces.  A 2.54 mm
+    // pitch is preferred for readability; dense interfaces fall back to KiCad's 1.27 mm grid.
+    for( auto& [ sheetId, netNames ] : automaticInterfaceNets )
+    {
+        JSON& sheet = sheets.at( sheetId );
+        std::set<std::string> existingNames;
+        std::set<std::string> occupied;
+
+        for( const JSON& pin : sheet["pins"] )
+        {
+            existingNames.emplace( pin["name"].get<std::string>() );
+            occupied.emplace( pin["side"].get<std::string>() + "/"
+                              + std::to_string( pin["position"]["xNm"].get<int64_t>() ) + "/"
+                              + std::to_string( pin["position"]["yNm"].get<int64_t>() ) );
+        }
+
+        std::vector<std::string> missingNames;
+
+        for( const std::string& netName : netNames )
+        {
+            if( !existingNames.contains( netName ) )
+                missingNames.push_back( netName );
+        }
+
+        if( sheet["pins"].size() + missingNames.size() > 256 )
+        {
+            diagnostic( result, "too_many_inferred_sheet_pins",
+                        "sheet " + sheetId + " needs "
+                                + std::to_string( sheet["pins"].size() + missingNames.size() )
+                                + " hierarchy interfaces; split the sheet or use explicit buses" );
+            continue;
+        }
+
+        const int64_t originX = sheet["position"]["xNm"].get<int64_t>();
+        const int64_t originY = sheet["position"]["yNm"].get<int64_t>();
+        const int64_t width = sheet["size"]["xNm"].get<int64_t>();
+        const int64_t height = sheet["size"]["yNm"].get<int64_t>();
+        const auto availableSlots = [&]( int64_t aPitch )
+        {
+            std::vector<JSON> slots;
+            const auto append = [&]( const std::string& aSide, int64_t aX, int64_t aY )
+            {
+                const std::string key = aSide + "/" + std::to_string( aX ) + "/"
+                                        + std::to_string( aY );
+
+                if( !occupied.contains( key ) )
+                {
+                    slots.push_back( { { "direction", "passive" }, { "side", aSide },
+                                       { "position", { { "xNm", aX }, { "yNm", aY } } } } );
+                }
+            };
+
+            // Exhaust one edge before using its opposite.  Alternating left/right (or
+            // top/bottom) at the same axis coordinate makes a parent-page route to one pin pass
+            // directly through the other pin, electrically merging two unrelated nets.
+            for( const std::string& side : { std::string( "left" ), std::string( "right" ) } )
+            {
+                for( int64_t offset = aPitch; offset < height; offset += aPitch )
+                {
+                    append( side, side == "left" ? originX : originX + width,
+                            originY + offset );
+                }
+            }
+
+            for( const std::string& side : { std::string( "top" ), std::string( "bottom" ) } )
+            {
+                for( int64_t offset = aPitch; offset < width; offset += aPitch )
+                {
+                    append( side, originX + offset,
+                            side == "top" ? originY : originY + height );
+                }
+            }
+
+            return slots;
+        };
+
+        std::vector<JSON> slots = availableSlots( 2'540'000 );
+
+        if( slots.size() < missingNames.size() )
+            slots = availableSlots( 1'270'000 );
+
+        if( slots.size() < missingNames.size() )
+        {
+            diagnostic( result, "sheet_interface_does_not_fit",
+                        "sheet " + sheetId + " cannot fit "
+                                + std::to_string( missingNames.size() )
+                                + " inferred hierarchy pins on its declared boundary; enlarge the "
+                                  "sheet or use explicit buses" );
+            continue;
+        }
+
+        for( size_t index = 0; index < missingNames.size(); ++index )
+        {
+            JSON pin = slots[index];
+            pin["name"] = missingNames[index];
+            sheet["pins"].push_back( std::move( pin ) );
+        }
+    }
+
+    if( !result.diagnostics.empty() )
+        return result;
+
+    // Each inferred sheet pin has two electrical anchors: the parent-side sheet symbol pin and
+    // the matching child-side hierarchical label.  Add both to the correct local routing graph.
+    std::map<std::string, std::set<int64_t>> childInterfaceLanesBySheet;
+
+    for( const auto& [ sheetId, netNames ] : automaticInterfaceNets )
+    {
+        const JSON& sheet = sheets.at( sheetId );
+        const std::string parent = sheet["parent"].get<std::string>();
+        std::vector<JSON> sortedPins = sheet["pins"].get<std::vector<JSON>>();
+        std::sort( sortedPins.begin(), sortedPins.end(), []( const JSON& aLeft, const JSON& aRight )
+                   {
+                       return aLeft.at( "name" ).get<std::string>()
+                              < aRight.at( "name" ).get<std::string>();
+                   } );
+
+        for( size_t pinIndex = 0; pinIndex < sortedPins.size(); ++pinIndex )
+        {
+            const JSON& pin = sortedPins[pinIndex];
+            const std::string netName = pin["name"].get<std::string>();
+
+            if( !netNames.contains( netName ) )
+                continue;
+
+            const int64_t hierarchyAnchor = snapConnectionGrid( 20'000'000 );
+            int64_t preferredChildY = hierarchyAnchor
+                                      + static_cast<int64_t>( pinIndex ) * 2'540'000;
+            const auto netSheets = automaticNetPoints.find( netName );
+            std::vector<PIN_POINT> childEndpoints;
+
+            if( netSheets != automaticNetPoints.end() )
+            {
+                const auto childEndpointSet = netSheets->second.find( sheetId );
+
+                if( childEndpointSet != netSheets->second.end() )
+                    childEndpoints = childEndpointSet->second;
+            }
+
+            if( !childEndpoints.empty() )
+            {
+                std::vector<int64_t> endpointYs;
+                endpointYs.reserve( childEndpoints.size() );
+
+                for( const PIN_POINT& endpoint : childEndpoints )
+                    endpointYs.push_back( endpoint.y );
+
+                std::sort( endpointYs.begin(), endpointYs.end() );
+                preferredChildY = endpointYs[endpointYs.size() / 2];
+            }
+
+            PIN_POINT childPoint = {
+                sheetId, hierarchyAnchor, preferredChildY, 0
+            };
+            bool placedNearEndpoint = false;
+            std::stable_sort(
+                    childEndpoints.begin(), childEndpoints.end(),
+                    []( const PIN_POINT& aLeft, const PIN_POINT& aRight )
+                    {
+                        const bool leftHorizontal =
+                                aLeft.labelRotation == 0 || aLeft.labelRotation == 180;
+                        const bool rightHorizontal =
+                                aRight.labelRotation == 0 || aRight.labelRotation == 180;
+
+                        if( leftHorizontal != rightHorizontal )
+                            return leftHorizontal;
+
+                        return std::tie( aLeft.y, aLeft.x, aLeft.labelRotation )
+                               < std::tie( aRight.y, aRight.x, aRight.labelRotation );
+                    } );
+            constexpr std::array<int64_t, 5> LABEL_STUB_LENGTHS_NM = {
+                5'080'000, 2'540'000, 7'620'000, 10'160'000, 1'270'000
+            };
+
+            for( const PIN_POINT& endpoint : childEndpoints )
+            {
+                const int directionX = endpoint.labelRotation == 0 ? 1
+                                       : endpoint.labelRotation == 180 ? -1
+                                                                       : 0;
+                const int directionY = endpoint.labelRotation == 90 ? 1
+                                       : endpoint.labelRotation == 270 ? -1
+                                                                       : 0;
+
+                for( const int64_t length : LABEL_STUB_LENGTHS_NM )
+                {
+                    const int64_t candidateX =
+                            endpoint.x + static_cast<int64_t>( directionX ) * length;
+                    const int64_t candidateY =
+                            endpoint.y + static_cast<int64_t>( directionY ) * length;
+
+                    if( candidateX < 0 || candidateY < 0
+                        || candidateX > GENERATED_ROUTE_LIMIT_NM
+                        || candidateY > GENERATED_ROUTE_LIMIT_NM )
+                    {
+                        continue;
+                    }
+
+                    const AXIS_SEGMENT stub = {
+                        endpoint.x, endpoint.y, candidateX, candidateY
+                    };
+
+                    if( findRouteConflict( sheetId, netName, { stub } ) )
+                        continue;
+
+                    childPoint = {
+                        sheetId, candidateX, candidateY, endpoint.labelRotation
+                    };
+                    placedNearEndpoint = true;
+                    break;
+                }
+
+                if( placedNearEndpoint )
+                    break;
+            }
+
+            auto& childInterfaceLanes = childInterfaceLanesBySheet[sheetId];
+
+            if( !placedNearEndpoint )
+            {
+                std::set<int64_t> occupiedChildLanes = reservedHorizontalLanes[sheetId];
+                occupiedChildLanes.insert( childInterfaceLanes.begin(),
+                                           childInterfaceLanes.end() );
+                const int64_t childY = chooseFreeLane( preferredChildY,
+                                                        occupiedChildLanes );
+
+                if( childY < 0 )
+                {
+                    diagnostic(
+                            result, "schematic_route_space_exhausted",
+                            "sheet " + sheetId
+                                    + " cannot allocate an isolated hierarchical label lane" );
+                    continue;
+                }
+
+                childPoint.y = childY;
+            }
+
+            childInterfaceLanes.insert( childPoint.y );
+            const PIN_POINT parentPoint = {
+                parent, pin["position"]["xNm"].get<int64_t>(),
+                pin["position"]["yNm"].get<int64_t>(),
+                sideAngle( pin["side"].get<std::string>() )
+            };
+            automaticNetPoints[netName][sheetId].push_back( childPoint );
+            automaticNetPoints[netName][parent].push_back( parentPoint );
+            childInterfacePositions[sheetId][netName] = childPoint;
+            netEndpointsBySheet[sheetId].push_back(
+                    { netName, "hierarchical_label/" + sheetId + "/" + netName,
+                      childPoint } );
+            netEndpointsBySheet[parent].push_back(
+                    { netName, "sheet_pin/" + sheetId + "/" + netName,
+                      parentPoint } );
+            reservedVerticalLanes[sheetId].insert( childPoint.x );
+            reservedHorizontalLanes[sheetId].insert( childPoint.y );
+            reservedVerticalLanes[parent].insert( parentPoint.x );
+            reservedHorizontalLanes[parent].insert( parentPoint.y );
+        }
+    }
+
+    size_t syntheticEndpointId = 0;
+    const auto routePoints = [&]( const std::string& aNetName, const std::string& aSheet,
+                                  const std::vector<PIN_POINT>& aPoints,
+                                  NET_NAME_SCOPE aNameScope )
+    {
+        if( aPoints.size() < 2 )
+        {
+            diagnostic( result, "incomplete_hierarchical_route",
+                        "net " + aNetName + " has an incomplete hierarchy interface on sheet "
+                                + aSheet );
+            return;
+        }
+
+        JSON localNet = { { "name", aNetName }, { "pins", JSON::array() } };
+
+        for( const PIN_POINT& point : aPoints )
+        {
+            const std::string reference = "__KDS_HIER_" + std::to_string( syntheticEndpointId++ );
+            const std::string number = "1";
+            endpointPositions[reference + "/1/" + number] = { point };
+            localNet["pins"].push_back(
+                    { { "component", reference }, { "unit", 1 }, { "number", number } } );
+        }
+
+        addWiredNet( localNet, "hierarchical/" + aNetName + "/" + aSheet, aNameScope );
     };
 
     try
@@ -3365,7 +4860,9 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
             if( !net.is_object() || !net.contains( "name" ) || !net["name"].is_string()
                 || !net.contains( "pins" ) || !net["pins"].is_array()
                 || !net.contains( "presentation" ) || !net["presentation"].is_string()
-                || ( net["presentation"] != "wired" && net["presentation"] != "labels" ) )
+                || ( net["presentation"] != "auto" && net["presentation"] != "wired"
+                     && net["presentation"] != "labels"
+                     && net["presentation"] != "hierarchical" ) )
             {
                 diagnostic( result, "invalid_schematic_ir", "schematic net IR is malformed" );
                 continue;
@@ -3373,14 +4870,50 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
 
             const std::string name = net["name"].get<std::string>();
 
-            if( net["presentation"] == "wired" )
-            {
-                addWiredNet( net );
-            }
-            else
+            if( net["presentation"] == "labels" )
             {
                 for( const JSON& endpoint : net["pins"] )
                     addEndpoint( endpoint, name, false );
+            }
+            else if( ( net["presentation"] == "auto"
+                       || net["presentation"] == "hierarchical"
+                       || net["presentation"] == "wired" )
+                     && automaticNetPoints[name].size() > 1 )
+            {
+                const auto sheetDepth = [&]( const std::string& aSheet )
+                {
+                    size_t depth = 0;
+                    std::string cursor = aSheet;
+
+                    while( !sheets.at( cursor )["parent"].is_null() )
+                    {
+                        ++depth;
+                        cursor = sheets.at( cursor )["parent"].get<std::string>();
+                    }
+
+                    return depth;
+                };
+                const auto namingSheet = std::min_element(
+                        automaticNetPoints[name].begin(), automaticNetPoints[name].end(),
+                        [&]( const auto& aLeft, const auto& aRight )
+                        {
+                            const size_t leftDepth = sheetDepth( aLeft.first );
+                            const size_t rightDepth = sheetDepth( aRight.first );
+                            return leftDepth != rightDepth ? leftDepth < rightDepth
+                                                           : aLeft.first < aRight.first;
+                        } );
+
+                for( const auto& [ sheet, points ] : automaticNetPoints[name] )
+                {
+                    const NET_NAME_SCOPE labelScope = sheet != namingSheet->first
+                                                              ? NET_NAME_SCOPE::NONE
+                                                              : NET_NAME_SCOPE::GLOBAL;
+                    routePoints( name, sheet, points, labelScope );
+                }
+            }
+            else
+            {
+                addWiredNet( net, name, NET_NAME_SCOPE::GLOBAL );
             }
         }
 
@@ -3621,11 +5154,26 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
                 for( size_t pinIndex = 0; pinIndex < pins.size(); ++pinIndex )
                 {
                     const JSON& pin = pins[pinIndex];
+                    const std::string pinName = pin["name"].get<std::string>();
                     const std::string logicalId = id + "/" + pin["name"].get<std::string>();
                     const std::string uuid =
                             stableUuid( project, "schematic_hier_label", logicalId );
+                    const auto plannedPosition = childInterfacePositions[id].find( pinName );
+                    const int64_t labelX = plannedPosition != childInterfacePositions[id].end()
+                                                   ? plannedPosition->second.x
+                                                   : snapConnectionGrid( 20'000'000 );
+                    const int64_t labelY = plannedPosition != childInterfacePositions[id].end()
+                                                   ? plannedPosition->second.y
+                                                   : labelX
+                                                             + static_cast<int64_t>( pinIndex )
+                                                                       * 2'540'000;
+                    const int labelRotation =
+                            plannedPosition != childInterfacePositions[id].end()
+                                    ? plannedPosition->second.labelRotation
+                                    : 180;
                     const std::string source =
-                            hierarchicalLabel( sheet, pin, project, pinIndex );
+                            hierarchicalLabel( sheet, pin, project, labelX, labelY,
+                                               labelRotation );
                     items.push_back( { { "kind", "hierarchical_label" },
                                        { "file", file },
                                        { "logicalId", logicalId },

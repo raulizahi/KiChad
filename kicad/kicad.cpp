@@ -264,6 +264,13 @@ bool PGM_KICAD::OnPgmInit()
             insertExpanded( it->second.GetValue() );
     }
 
+#ifdef KICAD_IPC_API
+    // A directly selected editor frame registers its API handler from its constructor.  The
+    // server must exist before Kiway.Player() constructs that frame; creating it afterward makes
+    // Pgm().GetApiServer() dereference a null owner during --frame pcb/sch startup.
+    m_api_server = std::make_unique<KICAD_API_SERVER>();
+#endif
+
     wxFrame*      frame = nullptr;
     KIWAY_PLAYER* playerFrame = nullptr;
     KICAD_MANAGER_FRAME* managerFrame = nullptr;
@@ -306,33 +313,38 @@ bool PGM_KICAD::OnPgmInit()
     GetLibraryManager().LoadGlobalTables();
 
 #ifdef KICAD_IPC_API
-    m_api_server = std::make_unique<KICAD_API_SERVER>();
-    m_api_common_handler = std::make_unique<API_HANDLER_COMMON>(
-            []( int aChange )
-            {
-                int flags = 0;
-
-                if( aChange & APIPSC_NETCLASSES )
+    // The PCB and schematic editors register their own common handler in standalone mode.  Every
+    // other top frame retains the launcher-owned common handler, avoiding both duplicate command
+    // handling for those two editors and a regression for the remaining --frame modes.
+    if( appType != FRAME_PCB_EDITOR && appType != FRAME_SCH )
+    {
+        m_api_common_handler = std::make_unique<API_HANDLER_COMMON>(
+                []( int aChange )
                 {
-                    Prj().IncrementNetclassesTicker();
-                    flags |= NETCLASSES_CHANGED;
-                }
+                    int flags = 0;
 
-                if( aChange & APIPSC_TEXT_VARIABLES )
-                {
-                    Prj().IncrementTextVarsTicker();
-                    flags |= TEXTVARS_CHANGED;
-                }
+                    if( aChange & APIPSC_NETCLASSES )
+                    {
+                        Prj().IncrementNetclassesTicker();
+                        flags |= NETCLASSES_CHANGED;
+                    }
 
-                if( aChange & APIPSC_FIELD_TEMPLATES )
-                    flags |= FIELD_TEMPLATES_CHANGED;
+                    if( aChange & APIPSC_TEXT_VARIABLES )
+                    {
+                        Prj().IncrementTextVarsTicker();
+                        flags |= TEXTVARS_CHANGED;
+                    }
 
-                if( aChange & APIPSC_ERC_SEVERITIES )
-                    flags |= ERC_SETTINGS_CHANGED;
+                    if( aChange & APIPSC_FIELD_TEMPLATES )
+                        flags |= FIELD_TEMPLATES_CHANGED;
 
-                Kiway.CommonSettingsChanged( flags );
-            } );
-    m_api_server->RegisterHandler( m_api_common_handler.get() );
+                    if( aChange & APIPSC_ERC_SEVERITIES )
+                        flags |= ERC_SETTINGS_CHANGED;
+
+                    Kiway.CommonSettingsChanged( flags );
+                } );
+        m_api_server->RegisterHandler( m_api_common_handler.get() );
+    }
 #endif
 
     wxString projToLoad;

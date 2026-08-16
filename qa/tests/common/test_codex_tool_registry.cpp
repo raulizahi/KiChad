@@ -11,6 +11,7 @@
 
 #include <qa_utils/wx_utils/unit_test_utils.h>
 
+#include <kicad/codex/codex_tool_internal.h>
 #include <kicad/codex/codex_tool_registry.h>
 #include <kicad/codex/design_script_pcb_planner.h>
 #include <kicad/codex/kicad_ipc_client.h>
@@ -283,13 +284,16 @@ BOOST_AUTO_TEST_CASE( AttachesNativePreviewImagesToTheModel )
     CODEX_TOOL_REGISTRY registry(
             [&fixture]() { return fixture.Root(); }, {}, {}, {}, {}, {}, {}, {},
             [&]( const std::string& aView, const wxFileName& aInput,
-                 const wxFileName& aOutput, int aPage, std::string& )
+                 const std::vector<int>& aPages,
+                 const std::vector<wxFileName>& aOutputs, std::string& )
             {
                 ++calls;
                 BOOST_CHECK_EQUAL( aView, "schematic" );
                 BOOST_CHECK_EQUAL( aInput.GetFullName(), wxS( "design.kicad_sch" ) );
-                BOOST_CHECK_EQUAL( aPage, 1 );
-                wxFile file( aOutput.GetFullPath(), wxFile::write );
+                BOOST_REQUIRE_EQUAL( aPages.size(), 1 );
+                BOOST_REQUIRE_EQUAL( aOutputs.size(), 1 );
+                BOOST_CHECK_EQUAL( aPages.front(), 1 );
+                wxFile file( aOutputs.front().GetFullPath(), wxFile::write );
                 const unsigned char pngSignature[] = {
                     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
                 };
@@ -309,8 +313,8 @@ BOOST_AUTO_TEST_CASE( AttachesNativePreviewImagesToTheModel )
     JSON data = envelope( rendered )["data"];
     BOOST_CHECK_EQUAL( data["view"].get<std::string>(), "schematic" );
     BOOST_CHECK_EQUAL( data["previewBytes"].get<int>(), 8 );
-    BOOST_CHECK( data["previewPath"].get<std::string>()
-                         .starts_with( ".kichad/previews/" ) );
+    BOOST_CHECK( !data.contains( "previewPath" ) );
+    BOOST_CHECK_EQUAL( data["pages"][0]["contentItemIndex"].get<int>(), 1 );
     BOOST_CHECK_EQUAL( calls, 1 );
 
     JSON mismatch = registry.Handle(
@@ -320,6 +324,237 @@ BOOST_AUTO_TEST_CASE( AttachesNativePreviewImagesToTheModel )
     BOOST_CHECK_EQUAL( envelope( mismatch )["error"]["code"].get<std::string>(),
                        "invalid_path" );
     BOOST_CHECK_EQUAL( calls, 1 );
+}
+
+
+BOOST_AUTO_TEST_CASE( RendersEverySchematicHierarchyPageWhenPageIsOmitted )
+{
+    TOOL_PROJECT_FIXTURE fixture;
+    const auto write = [&]( const wxString& aName, const wxString& aSource )
+    {
+        wxFFile file( wxFileName( fixture.Root(), aName ).GetFullPath(), wxS( "wb" ) );
+        BOOST_REQUIRE( file.IsOpened() );
+        BOOST_REQUIRE( file.Write( aSource ) );
+    };
+    write( wxS( "design.kicad_sch" ),
+           wxS( "(kicad_sch (version 20260306)\n"
+                "  (generator \"eeschema\")\n"
+                "  (sheet\n"
+                "    (property \"Sheetname\" \"Power\")\n"
+                "    (property \"Sheetfile\" \"power.kicad_sch\")\n"
+                "    (instances (project \"design\"\n"
+                "      (path \"/power\" (page \"2\")))))\n"
+                "  (sheet\n"
+                "    (property \"Sheetname\" \"Control\")\n"
+                "    (property \"Sheetfile\" \"control.kicad_sch\")\n"
+                "    (instances (project \"design\"\n"
+                "      (path \"/control\" (page \"3\")))))\n"
+                ")\n" ) );
+    write( wxS( "power.kicad_sch" ),
+           wxS( "(kicad_sch (version 20260306) (generator \"eeschema\"))\n" ) );
+    write( wxS( "control.kicad_sch" ),
+           wxS( "(kicad_sch (version 20260306) (generator \"eeschema\"))\n" ) );
+
+    int calls = 0;
+    CODEX_TOOL_REGISTRY registry(
+            [&fixture]() { return fixture.Root(); }, {}, {}, {}, {}, {}, {}, {},
+            [&]( const std::string& aView, const wxFileName&,
+                 const std::vector<int>& aPages,
+                 const std::vector<wxFileName>& aOutputs, std::string& )
+            {
+                ++calls;
+                BOOST_CHECK_EQUAL( aView, "schematic" );
+                BOOST_REQUIRE_EQUAL( aPages.size(), 3 );
+                BOOST_REQUIRE_EQUAL( aOutputs.size(), 3 );
+                BOOST_CHECK_EQUAL( aPages[0], 1 );
+                BOOST_CHECK_EQUAL( aPages[1], 2 );
+                BOOST_CHECK_EQUAL( aPages[2], 3 );
+
+                const unsigned char pngSignature[] = {
+                    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
+                };
+
+                for( const wxFileName& output : aOutputs )
+                {
+                    wxFile file( output.GetFullPath(), wxFile::write );
+
+                    if( !file.IsOpened()
+                        || file.Write( pngSignature, sizeof( pngSignature ) )
+                                   != sizeof( pngSignature ) )
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            } );
+    JSON rendered = registry.Handle(
+            "inspect", { { "operation", "render" }, { "path", "design.kicad_sch" },
+                           { "view", "schematic" } } );
+    BOOST_REQUIRE_MESSAGE( rendered.at( "success" ).get<bool>(), rendered.dump() );
+    BOOST_REQUIRE_EQUAL( rendered["contentItems"].size(), 4 );
+    const JSON data = envelope( rendered )["data"];
+    BOOST_CHECK_EQUAL( data["pageCount"].get<int>(), 3 );
+    BOOST_CHECK_EQUAL( data["renderedPages"].get<int>(), 3 );
+    BOOST_CHECK( !data["pagesTruncated"].get<bool>() );
+    BOOST_CHECK_EQUAL( data["previewBytes"].get<int>(), 24 );
+    BOOST_REQUIRE_EQUAL( data["pages"].size(), 3 );
+    BOOST_CHECK_EQUAL( data["pages"][0]["sheetPath"].get<std::string>(), "/" );
+    BOOST_CHECK_EQUAL( data["pages"][1]["sheetName"].get<std::string>(), "Power" );
+    BOOST_CHECK_EQUAL( data["pages"][1]["sourcePath"].get<std::string>(),
+                       "power.kicad_sch" );
+    BOOST_CHECK_EQUAL( data["pages"][2]["sheetName"].get<std::string>(), "Control" );
+    BOOST_CHECK_EQUAL( calls, 1 );
+}
+
+
+BOOST_AUTO_TEST_CASE( InvalidatesSchematicPreviewsWhenAnyHierarchyFileChanges )
+{
+    TOOL_PROJECT_FIXTURE fixture;
+    const auto write = [&]( const wxString& aName, const wxString& aSource )
+    {
+        wxFFile file( wxFileName( fixture.Root(), aName ).GetFullPath(), wxS( "wb" ) );
+        BOOST_REQUIRE( file.IsOpened() );
+        BOOST_REQUIRE( file.Write( aSource ) );
+    };
+    write( wxS( "design.kicad_sch" ),
+           wxS( "(kicad_sch (version 20260306)\n"
+                "  (generator \"eeschema\")\n"
+                "  (symbol (property \"Sheetfile\" \"not-a-child.kicad_sch\"))\n"
+                "  (sheet\n"
+                "    (property \"Sheetname\" \"Child\")\n"
+                "    (property \"Sheetfile\" \"child.kicad_sch\"))\n"
+                ")\n" ) );
+    write( wxS( "child.kicad_sch" ),
+           wxS( "(kicad_sch (version 20260306) (generator \"eeschema\"))\n" ) );
+
+    int calls = 0;
+    CODEX_TOOL_REGISTRY registry(
+            [&fixture]() { return fixture.Root(); }, {}, {}, {}, {}, {}, {}, {},
+            [&]( const std::string&, const wxFileName&, const std::vector<int>& aPages,
+                 const std::vector<wxFileName>& aOutputs, std::string& )
+            {
+                ++calls;
+                BOOST_REQUIRE_EQUAL( aPages.size(), 1 );
+                BOOST_REQUIRE_EQUAL( aOutputs.size(), 1 );
+                BOOST_CHECK_EQUAL( aPages.front(), 2 );
+                wxFile file( aOutputs.front().GetFullPath(), wxFile::write );
+                const unsigned char pngSignature[] = {
+                    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
+                };
+                return file.IsOpened()
+                       && file.Write( pngSignature, sizeof( pngSignature ) )
+                                  == sizeof( pngSignature );
+            } );
+    const JSON request = { { "operation", "render" }, { "path", "design.kicad_sch" },
+                           { "view", "schematic" }, { "page", 2 } };
+    const JSON first = registry.Handle( "inspect", request );
+    BOOST_REQUIRE_MESSAGE( first.at( "success" ).get<bool>(), first.dump() );
+    const JSON firstData = envelope( first )["data"];
+    BOOST_CHECK_EQUAL( firstData["sourceFiles"].get<int>(), 2 );
+    BOOST_CHECK_GT( firstData["sourceBytes"].get<int>(), 0 );
+    BOOST_CHECK_EQUAL( firstData["sourceSha256"].get<std::string>().size(), 64 );
+    const std::filesystem::path previewDirectory =
+            std::filesystem::path( fixture.Root().ToStdString() ) / ".kichad" / "previews";
+    std::vector<std::filesystem::path> firstPreviews;
+
+    for( const std::filesystem::directory_entry& entry :
+         std::filesystem::directory_iterator( previewDirectory ) )
+    {
+        if( entry.is_regular_file() )
+            firstPreviews.push_back( entry.path() );
+    }
+
+    BOOST_REQUIRE_EQUAL( firstPreviews.size(), 1 );
+    const std::filesystem::path firstPreview = firstPreviews.front();
+
+    write( wxS( "child.kicad_sch" ),
+           wxS( "(kicad_sch (version 20260306) (generator \"eeschema\")\n"
+                "  (text \"changed child revision\"))\n" ) );
+    const JSON second = registry.Handle( "inspect", request );
+    BOOST_REQUIRE_MESSAGE( second.at( "success" ).get<bool>(), second.dump() );
+    const JSON secondData = envelope( second )["data"];
+    BOOST_CHECK_NE( firstData["sourceSha256"], secondData["sourceSha256"] );
+    BOOST_CHECK_EQUAL( secondData["pages"][0]["contentItemIndex"].get<int>(), 1 );
+    BOOST_CHECK_EQUAL( secondData["supersededPreviewsRemoved"].get<int>(), 1 );
+    BOOST_CHECK( !std::filesystem::exists( firstPreview ) );
+    BOOST_CHECK_EQUAL( calls, 2 );
+}
+
+
+BOOST_AUTO_TEST_CASE( ValidatesAuthoredFootprintModelAssetsBeforePreviewOrApply )
+{
+    TOOL_PROJECT_FIXTURE fixture;
+    wxFileName models = wxFileName::DirName( fixture.Root() );
+    models.AppendDir( wxS( "models" ) );
+    BOOST_REQUIRE( wxFileName::Mkdir( models.GetFullPath(), 0700 ) );
+    wxFFile projectModel( wxFileName( models.GetFullPath(), wxS( "body.step" ) ).GetFullPath(),
+                          wxS( "wb" ) );
+    BOOST_REQUIRE( projectModel.IsOpened() );
+    BOOST_REQUIRE( projectModel.Write( wxS( "ISO-10303-21;\nEND-ISO-10303-21;\n" ) ) );
+    projectModel.Close();
+
+    wxFileName stockModels = wxFileName::DirName( fixture.Root() );
+    stockModels.AppendDir( wxS( "stock" ) );
+    BOOST_REQUIRE( wxFileName::Mkdir( stockModels.GetFullPath(), 0700 ) );
+    SCOPED_ENVIRONMENT stockModelEnvironment( wxS( "KICAD10_3DMODEL_DIR" ),
+                                               stockModels.GetFullPath() );
+    stockModels.AppendDir( wxS( "Resistor_SMD.3dshapes" ) );
+    BOOST_REQUIRE( wxFileName::Mkdir( stockModels.GetFullPath(), 0700 ) );
+    wxFFile stockModel(
+            wxFileName( stockModels.GetFullPath(), wxS( "R_0603_1608Metric.step" ) )
+                    .GetFullPath(),
+            wxS( "wb" ) );
+    BOOST_REQUIRE( stockModel.IsOpened() );
+    BOOST_REQUIRE( stockModel.Write( wxS( "ISO-10303-21;\nEND-ISO-10303-21;\n" ) ) );
+    stockModel.Close();
+
+    CODEX_TOOL_REGISTRY registry( [&fixture]() { return fixture.Root(); },
+                                  []() { return true; } );
+    const std::string validSource = R"KDS((kichad_design
+  (version 1) (project model_assets)
+  (library footprint Product (table project)
+    (uri "${KIPRJMOD}/Product.pretty") (managed true))
+  (footprint Product:BODY
+    (reference U) (value BODY) (attributes (smd true) (allow_missing_courtyard true))
+    (pad p1 (number 1) (type smd) (shape rect) (at 0mm 0mm)
+      (size 1mm 1mm) (layers F.Cu F.Mask F.Paste))
+    (model "${KIPRJMOD}/models/body.step")
+    (model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step"))
+))KDS";
+    JSON saved = registry.Handle( "design", { { "operation", "save" },
+                                                { "path", "models.kicad_kds" },
+                                                { "source", validSource } } );
+    BOOST_REQUIRE_MESSAGE( saved.at( "success" ).get<bool>(), saved.dump() );
+    std::string hash = envelope( saved )["data"]["sourceSha256"].get<std::string>();
+    JSON preview = registry.Handle( "design", { { "operation", "preview" },
+                                                  { "path", "models.kicad_kds" } } );
+    BOOST_REQUIRE_MESSAGE( preview.at( "success" ).get<bool>(), preview.dump() );
+    const JSON modelAssets = envelope( preview )["data"]["footprintModelAssets"];
+    BOOST_CHECK_EQUAL( modelAssets["checked"].get<int>(), 2 );
+    BOOST_CHECK_EQUAL( modelAssets["project"].get<int>(), 1 );
+    BOOST_CHECK_EQUAL( modelAssets["stock"].get<int>(), 1 );
+
+    std::string missingSource = validSource;
+    const std::string installed = "R_0603_1608Metric.step";
+    const size_t installedPosition = missingSource.find( installed );
+    BOOST_REQUIRE_NE( installedPosition, std::string::npos );
+    missingSource.replace( installedPosition, installed.size(), "MISSING_MODEL.step" );
+    saved = registry.Handle( "design", { { "operation", "save" },
+                                           { "path", "models.kicad_kds" },
+                                           { "source", missingSource },
+                                           { "expectedSha256", hash } } );
+    BOOST_REQUIRE_MESSAGE( saved.at( "success" ).get<bool>(), saved.dump() );
+    JSON missing = registry.Handle( "design", { { "operation", "preview" },
+                                                  { "path", "models.kicad_kds" } } );
+    BOOST_CHECK( !missing.at( "success" ).get<bool>() );
+    const JSON error = envelope( missing )["error"];
+    BOOST_CHECK_EQUAL( error["code"].get<std::string>(),
+                       "footprint_model_asset_unavailable" );
+    BOOST_CHECK_NE( error["message"].get<std::string>().find( "MISSING_MODEL.step" ),
+                    std::string::npos );
+    BOOST_CHECK_NE( error["message"].get<std::string>().find( "Product:BODY" ),
+                    std::string::npos );
 }
 
 
@@ -374,11 +609,43 @@ BOOST_AUTO_TEST_CASE( RendersRealNativePreviewsWhenRequested )
                            "inputImage" );
         const JSON data = envelope( rendered )["data"];
         BOOST_CHECK_GT( data["previewBytes"].get<int64_t>(), 8 );
-        const std::filesystem::path previewPath =
-                std::filesystem::path( fixture.Root().ToStdString() )
-                / data["previewPath"].get<std::string>();
-        BOOST_CHECK( wxFileExists( wxString::FromUTF8( previewPath.string() ) ) );
+        BOOST_CHECK_EQUAL( data["pages"][0]["contentItemIndex"].get<int>(), 1 );
     }
+}
+
+
+BOOST_AUTO_TEST_CASE( RendersExternalNativeSchematicHierarchyWhenRequested )
+{
+    wxString inputPath;
+
+    if( !wxGetEnv( wxS( "KICHAD_QA_EXTERNAL_SCHEMATIC_PREVIEW" ), &inputPath )
+        || inputPath.empty() )
+    {
+        BOOST_TEST_MESSAGE( "Skipping opt-in external hierarchy preview" );
+        return;
+    }
+
+    wxFileName input( inputPath );
+    BOOST_REQUIRE( input.FileExists() );
+    TOOL_PROJECT_FIXTURE configFixture;
+    wxFileName config = wxFileName::DirName( configFixture.Root() );
+    config.AppendDir( wxS( "config" ) );
+    BOOST_REQUIRE( wxFileName::Mkdir( config.GetFullPath(), wxS_DIR_DEFAULT,
+                                     wxPATH_MKDIR_FULL ) );
+    SCOPED_ENVIRONMENT isolatedConfig( wxS( "KICAD_CONFIG_HOME" ),
+                                       config.GetFullPath() );
+    CODEX_TOOL_REGISTRY registry( [input]() { return input.GetPath(); } );
+    JSON rendered = registry.Handle(
+            "inspect", { { "operation", "render" },
+                           { "path", input.GetFullName().ToStdString() },
+                           { "view", "schematic" } } );
+    BOOST_REQUIRE_MESSAGE( rendered.at( "success" ).get<bool>(), rendered.dump() );
+    const JSON data = envelope( rendered )["data"];
+    BOOST_REQUIRE_EQUAL( data["pageCount"], data["renderedPages"] );
+    BOOST_CHECK( data["hierarchyOverviewComposed"].get<bool>() );
+    BOOST_REQUIRE_EQUAL( rendered["contentItems"].size(),
+                         data["renderedPages"].get<size_t>() + 1 );
+    BOOST_TEST_MESSAGE( data.dump( 2 ) );
 }
 
 
@@ -747,14 +1014,17 @@ BOOST_AUTO_TEST_CASE( CompilesAndAtomicallySavesReusableDesignSidecars )
     const std::string source = R"KDS((kichad_design
   (version 1)
   (project reusable)
+  (sheet root (parent none) (file "reusable.kicad_sch") (title "Reusable"))
   (component R1
     (symbol "Device:R")
     (value "10k")
-    (footprint "Resistor_SMD:R_0603_1608Metric"))
+    (footprint "Resistor_SMD:R_0603_1608Metric")
+    (unit 1 (sheet root) (at 30mm 30mm) (rotation 0deg) (mirror none)))
   (component LED1
     (symbol "Device:LED")
     (value "GREEN")
-    (footprint "LED_SMD:LED_0603_1608Metric"))
+    (footprint "LED_SMD:LED_0603_1608Metric")
+    (unit 1 (sheet root) (at 50mm 30mm) (rotation 0deg) (mirror none)))
   (net LED_A (pin R1 1 1) (pin LED1 1 1))
   (board
     (outline
@@ -775,13 +1045,37 @@ BOOST_AUTO_TEST_CASE( CompilesAndAtomicallySavesReusableDesignSidecars )
     BOOST_CHECK( !compileData.contains( "ir" ) );
     const std::string firstHash = compileData["sourceSha256"].get<std::string>();
 
-    CODEX_TOOL_REGISTRY readOnlyRegistry( [&fixture]() { return fixture.Root(); } );
+    int nativeValidationCalls = 0;
+    CODEX_TOOL_REGISTRY readOnlyRegistry(
+            [&fixture]() { return fixture.Root(); }, {}, {},
+            [&]( const wxFileName& aRoot, const JSON& aCompilerIr,
+                 const JSON& aResolvedSymbols, std::string& )
+            {
+                ++nativeValidationCalls;
+                BOOST_CHECK( aRoot.FileExists() );
+                BOOST_CHECK_NE( aRoot.GetPath(), fixture.Root() );
+                BOOST_CHECK( aCompilerIr.contains( "schematic" ) );
+                BOOST_CHECK( aResolvedSymbols.is_object() );
+                return true;
+            } );
     JSON firstPreview = readOnlyRegistry.Handle(
             "design", { { "operation", "preview" }, { "source", source } } );
     JSON secondPreview = readOnlyRegistry.Handle(
             "design", { { "operation", "preview" }, { "source", source } } );
     BOOST_REQUIRE_MESSAGE( firstPreview.at( "success" ).get<bool>(), firstPreview.dump() );
     BOOST_REQUIRE_MESSAGE( secondPreview.at( "success" ).get<bool>(), secondPreview.dump() );
+    const std::string hierarchySource = R"KDS((kichad_design
+  (version 1)
+  (project validated_preview)
+  (sheet root (parent none) (file "validated_preview.kicad_sch") (title "Main"))
+  (sheet child (parent root) (file "child.kicad_sch") (title "Child")
+    (at 20mm 20mm) (size 40mm 20mm))
+))KDS";
+    JSON validatedPreview = readOnlyRegistry.Handle(
+            "design", { { "operation", "preview" }, { "source", hierarchySource } } );
+    BOOST_REQUIRE_MESSAGE( validatedPreview.at( "success" ).get<bool>(),
+                           validatedPreview.dump() );
+    BOOST_CHECK_EQUAL( nativeValidationCalls, 1 );
     JSON firstBoardPlan = envelope( firstPreview )["data"]["boardPlan"];
     JSON secondBoardPlan = envelope( secondPreview )["data"]["boardPlan"];
     BOOST_CHECK( firstBoardPlan["fullyLowered"].get<bool>() );
@@ -2447,7 +2741,10 @@ BOOST_AUTO_TEST_CASE( AppliesAndRollsBackKdsOwnedNativeSymbolLibrary )
     CODEX_TOOL_REGISTRY registry(
             [&fixture]() { return fixture.Root(); }, []() { return true; },
             [&fixture]() { return fixture.Root(); },
-            []( const wxFileName&, std::string& ) { return true; }, {}, {},
+            []( const wxFileName&, const JSON&, const JSON&, std::string& )
+            {
+                return true;
+            }, {}, {},
             [&]( const wxFileName& path, std::string& error )
             {
                 ++symbolValidationCalls;
@@ -2711,6 +3008,8 @@ BOOST_AUTO_TEST_CASE( AppliesKdsPlacementAsNarrowSchematicFootprintUpdate )
     liveFootprint.set_layer( kiapi::board::types::BL_F_Cu );
     liveFootprint.set_locked( kiapi::common::types::LS_UNLOCKED );
     liveFootprint.mutable_reference_field()->mutable_text()->mutable_text()->set_text( "R1" );
+    liveFootprint.mutable_definition()->mutable_id()->set_library_nickname( "R" );
+    liveFootprint.mutable_definition()->mutable_id()->set_entry_name( "R" );
     liveFootprint.mutable_attributes()->set_not_in_schematic( false );
     liveFootprint.mutable_symbol_path()->add_path()->set_value( rootSheetId );
     liveFootprint.mutable_symbol_path()->add_path()->set_value( symbolId );
@@ -3157,7 +3456,11 @@ BOOST_AUTO_TEST_CASE( AppliesReusableDesignAgainstLivePcbEditorWhenRequested )
     CODEX_TOOL_REGISTRY registry( [project]() { return project.GetFullPath(); },
                                   []() { return true; },
                                   [socketDirectory]() { return socketDirectory; },
-                                  []( const wxFileName&, std::string& ) { return true; } );
+                                  []( const wxFileName&, const JSON&, const JSON&,
+                                      std::string& )
+                                  {
+                                      return true;
+                                  } );
     const std::string sourceName = source.GetFullName().ToStdString();
     const std::string boardName = board.GetFullName().ToStdString();
     JSON nativeErc = registry.Handle(
@@ -3440,7 +3743,7 @@ BOOST_AUTO_TEST_CASE( AppliesReusableDesignAgainstLivePcbEditorWhenRequested )
     CODEX_TOOL_REGISTRY rejectingRegistry(
             [project]() { return project.GetFullPath(); }, []() { return true; },
             [socketDirectory]() { return socketDirectory; },
-            []( const wxFileName&, std::string& aError )
+            []( const wxFileName&, const JSON&, const JSON&, std::string& aError )
             {
                 aError = "injected native schematic rejection";
                 return false;
@@ -4129,6 +4432,41 @@ BOOST_AUTO_TEST_CASE( MaterializesAndReleasesStepperReferenceWhenRequested )
 }
 
 
+BOOST_AUTO_TEST_CASE( PreviewsExternalDesignReadOnlyWhenExplicitlyRequested )
+{
+    wxString sourcePath;
+
+    if( !wxGetEnv( wxS( "KICHAD_QA_EXTERNAL_PREVIEW_KDS" ), &sourcePath ) )
+    {
+        BOOST_TEST_MESSAGE( "Skipping opt-in external KDS preview test" );
+        return;
+    }
+
+    wxFileName source( sourcePath );
+    source.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+    BOOST_REQUIRE( source.FileExists() );
+    BOOST_REQUIRE_EQUAL( source.GetExt(), wxS( "kicad_kds" ) );
+    const wxString projectPath = source.GetPath();
+    const std::string sourceBefore = readExactTextFile( source );
+    CODEX_TOOL_REGISTRY registry(
+            [projectPath]() { return projectPath; }, {}, {},
+            []( const wxFileName& aRoot, const JSON& aCompilerIr,
+                const JSON& aResolvedSymbols, std::string& aError )
+            {
+                return KICHAD::CODEX_TOOLS::ValidateNativeSchematicHierarchy(
+                        aRoot, aCompilerIr, aResolvedSymbols, aError );
+            } );
+    JSON preview = registry.Handle(
+            "design", { { "operation", "preview" },
+                        { "path", source.GetFullName().ToStdString() } } );
+    BOOST_REQUIRE_MESSAGE( preview.at( "success" ).get<bool>(), preview.dump( 2 ) );
+    const JSON data = envelope( preview )["data"];
+    BOOST_CHECK( data["schematicPlan"]["fullyLowered"].get<bool>() );
+    BOOST_CHECK( data["schematicPlan"]["diagnostics"].empty() );
+    BOOST_CHECK_EQUAL( readExactTextFile( source ), sourceBefore );
+}
+
+
 BOOST_AUTO_TEST_CASE( AppliesExternalDesignAgainstLivePcbEditorWhenRequested )
 {
     wxString projectPath;
@@ -4160,7 +4498,11 @@ BOOST_AUTO_TEST_CASE( AppliesExternalDesignAgainstLivePcbEditorWhenRequested )
     CODEX_TOOL_REGISTRY registry( [project]() { return project.GetFullPath(); },
                                   []() { return true; },
                                   [socketDirectory]() { return socketDirectory; },
-                                  []( const wxFileName&, std::string& ) { return true; } );
+                                  []( const wxFileName&, const JSON&, const JSON&,
+                                      std::string& )
+                                  {
+                                      return true;
+                                  } );
     const std::string sourceName = source.GetFullName().ToStdString();
     const std::string boardName = board.GetFullName().ToStdString();
     JSON compiled = registry.Handle( "design", { { "operation", "compile" },

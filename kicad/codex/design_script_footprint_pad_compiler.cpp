@@ -937,11 +937,92 @@ DESIGN_SCRIPT_FOOTPRINT_PAD_COMPILER::Compile( const LOSSLESS_SEXPR_DOCUMENT& aD
         diagnostic( result, "invalid_authored_footprint_through_hole_layers",
                     "through-hole pads require all_copper in their layer set" );
 
-    if( ( type == "smd" || type == "connect" )
-        && !layers.contains( "F.Cu" ) && !layers.contains( "B.Cu" ) )
+    const bool frontCopper = layers.contains( "F.Cu" );
+    const bool backCopper = layers.contains( "B.Cu" );
+    const bool aperturePad = type == "smd" && !frontCopper && !backCopper;
+
+    if( aperturePad )
+    {
+        const bool frontAperture = layers.contains( "F.Paste" )
+                                   || layers.contains( "F.Mask" )
+                                   || layers.contains( "F.Adhes" );
+        const bool backAperture = layers.contains( "B.Paste" )
+                                  || layers.contains( "B.Mask" )
+                                  || layers.contains( "B.Adhes" );
+        const bool onlyApertureLayers =
+                std::all_of( layers.begin(), layers.end(),
+                             []( const std::string& aLayer )
+                             {
+                                 return aLayer == "F.Paste" || aLayer == "F.Mask"
+                                        || aLayer == "F.Adhes" || aLayer == "B.Paste"
+                                        || aLayer == "B.Mask" || aLayer == "B.Adhes";
+                             } );
+
+        if( !result.pad["number"].get_ref<const std::string&>().empty() )
+        {
+            diagnostic( result, "numbered_authored_footprint_aperture_pad",
+                        "non-copper aperture pads must have an empty pad number" );
+        }
+
+        if( !onlyApertureLayers || frontAperture == backAperture )
+        {
+            diagnostic( result, "invalid_authored_footprint_aperture_pad_layers",
+                        "non-copper aperture pads require front-only or back-only paste, mask, "
+                        "or adhesive layers" );
+        }
+
+        const bool electricalMetadata = result.pad["teardrop"].is_object()
+                                        || result.pad["property"] != "none"
+                                        || !result.pad["pinFunction"].get_ref<
+                                                const std::string&>().empty()
+                                        || !result.pad["pinType"].get_ref<
+                                                const std::string&>().empty()
+                                        || result.pad["dieLengthNm"] != 0
+                                        || !result.pad["clearanceNm"].is_null()
+                                        || result.pad["zoneConnection"] != "inherit"
+                                        || !result.pad["thermalSpokeWidthNm"].is_null()
+                                        || !result.pad["thermalSpokeAngleTenths"].is_null()
+                                        || !result.pad["thermalGapNm"].is_null()
+                                        || result.pad["removeUnusedLayers"] == true
+                                        || result.pad["keepEndLayers"] == true;
+
+        if( electricalMetadata )
+        {
+            diagnostic( result,
+                        "invalid_authored_footprint_aperture_pad_electrical_metadata",
+                        "non-copper aperture pads are stencil/mask/adhesive geometry and "
+                        "cannot declare electrical pad properties" );
+        }
+
+        if( !result.pad["holeTreatment"].is_null()
+            || !result.pad["backdrills"].is_null()
+            || !result.pad["padstack"].is_null() )
+        {
+            diagnostic( result,
+                        "invalid_authored_footprint_aperture_pad_manufacturing_metadata",
+                        "non-copper aperture pads cannot declare drilled-hole or copper "
+                        "padstack manufacturing properties" );
+        }
+
+        if( !result.pad["solderMaskMarginNm"].is_null()
+            && !layers.contains( "F.Mask" ) && !layers.contains( "B.Mask" ) )
+        {
+            diagnostic( result, "invalid_authored_footprint_aperture_pad_mask_margin",
+                        "solder_mask_margin requires a mask layer on the aperture pad" );
+        }
+
+        if( ( !result.pad["solderPasteMarginNm"].is_null()
+              || !result.pad["solderPasteMarginPpm"].is_null() )
+            && !layers.contains( "F.Paste" ) && !layers.contains( "B.Paste" ) )
+        {
+            diagnostic( result, "invalid_authored_footprint_aperture_pad_paste_margin",
+                        "solder-paste margins require a paste layer on the aperture pad" );
+        }
+    }
+    else if( ( type == "smd" || type == "connect" ) && !frontCopper && !backCopper )
     {
         diagnostic( result, "invalid_authored_footprint_surface_pad_layers",
-                    "smd and connect pads require F.Cu or B.Cu" );
+                    "connect pads and electrical SMD pads require F.Cu or B.Cu" );
     }
 
     if( result.pad["keepEndLayers"].get<bool>()

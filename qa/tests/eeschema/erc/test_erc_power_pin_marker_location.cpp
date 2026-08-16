@@ -45,6 +45,10 @@
 #include <erc/erc_report.h>
 #include <settings/settings_manager.h>
 #include <locale_io.h>
+#include <wx/filename.h>
+
+#include <fstream>
+#include <nlohmann/json.hpp>
 
 
 struct ERC_POWER_PIN_MARKER_FIXTURE
@@ -84,6 +88,8 @@ BOOST_FIXTURE_TEST_CASE( ERCPowerPinNotDrivenMarkerOnPowerInputPin, ERC_POWER_PI
     int                       powerPinErrors = 0;
     bool                      allPowerInputAnchors = true;
     std::vector<wxString>     anchorDescriptions;
+    std::string               expectedJsonUuid;
+    VECTOR2I                  expectedJsonPosition;
 
     for( int ii = 0; ii < errors.GetCount(); ++ii )
     {
@@ -104,6 +110,12 @@ BOOST_FIXTURE_TEST_CASE( ERCPowerPinNotDrivenMarkerOnPowerInputPin, ERC_POWER_PI
                                "ERCE_POWERPIN_NOT_DRIVEN marker main item is not a pin" );
 
         SCH_PIN* pin = static_cast<SCH_PIN*>( mainItem );
+
+        if( expectedJsonUuid.empty() )
+        {
+            expectedJsonUuid = mainItem->m_Uuid.AsString().ToStdString();
+            expectedJsonPosition = mainItem->GetPosition();
+        }
 
         anchorDescriptions.push_back(
                 wxString::Format( "ref=%s pin=%s type=%s",
@@ -131,4 +143,36 @@ BOOST_FIXTURE_TEST_CASE( ERCPowerPinNotDrivenMarkerOnPowerInputPin, ERC_POWER_PI
                          << anchorDump.ToStdString()
                          << "\n"
                          << reportWriter.GetTextReport() );
+
+    const wxString jsonPath =
+            wxFileName::CreateTempFileName( wxS( "kicad-erc-coordinate-scale-" ) );
+    BOOST_REQUIRE( reportWriter.WriteJsonReport( jsonPath ) );
+    std::ifstream jsonStream( jsonPath.fn_str() );
+    BOOST_REQUIRE( jsonStream.is_open() );
+    nlohmann::json reportJson;
+    jsonStream >> reportJson;
+    jsonStream.close();
+    wxRemoveFile( jsonPath );
+    bool foundExpectedItem = false;
+
+    for( const nlohmann::json& sheet : reportJson["sheets"] )
+    {
+        for( const nlohmann::json& violation : sheet["violations"] )
+        {
+            for( const nlohmann::json& item : violation["items"] )
+            {
+                if( item.value( "uuid", std::string() ) != expectedJsonUuid )
+                    continue;
+
+                foundExpectedItem = true;
+                BOOST_CHECK_CLOSE_FRACTION( item["pos"]["x"].get<double>(),
+                                            schIUScale.IUTomm( expectedJsonPosition.x ), 1e-9 );
+                BOOST_CHECK_CLOSE_FRACTION( item["pos"]["y"].get<double>(),
+                                            schIUScale.IUTomm( expectedJsonPosition.y ), 1e-9 );
+            }
+        }
+    }
+
+    BOOST_CHECK_MESSAGE( foundExpectedItem,
+                         "ERC JSON report did not contain the expected marker item" );
 }
