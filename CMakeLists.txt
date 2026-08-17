@@ -855,6 +855,9 @@ include_directories(${LIBGIT2_INCLUDE_DIRS})
 # Find Boost headers and libraries, required.
 set( BOOST_REQUESTED_COMPONENTS locale )    # locale is required by nanoodbc/database libraries
 
+# Boost.Process v1 (used by the codex child-process helpers) links Boost.Filesystem.
+list( APPEND BOOST_REQUESTED_COMPONENTS filesystem )
+
 if( KICAD_BUILD_QA_TESTS )
     # required by the unit test framework
     list( APPEND BOOST_REQUESTED_COMPONENTS unit_test_framework )
