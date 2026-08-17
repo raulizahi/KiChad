@@ -14,7 +14,7 @@
 #include <kiid.h>
 
 #include <algorithm>
-#include <boost/process.hpp>
+#include "kichad_boost_process.h"
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -590,7 +590,7 @@ bool InstallAtomically( const wxFileName& aPath, bool aPresent, const FILES& aFi
 
 bool ValidateNative( const wxFileName& aPath, std::string& aError )
 {
-    namespace bp = boost::process;
+    namespace bp = KICHAD_BP;
     bool inputPresent = false;
     FILES inputFiles;
 

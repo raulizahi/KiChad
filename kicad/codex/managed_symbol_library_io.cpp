@@ -14,7 +14,7 @@
 #include <kiid.h>
 
 #include <algorithm>
-#include <boost/process.hpp>
+#include "kichad_boost_process.h"
 #include <chrono>
 #include <filesystem>
 #include <string_view>
@@ -302,7 +302,7 @@ bool InstallAtomically( const wxFileName& aPath, bool aPresent, const std::strin
 
 bool ValidateNative( const wxFileName& aPath, std::string& aError )
 {
-    namespace bp = boost::process;
+    namespace bp = KICHAD_BP;
     wxFileName cli;
 
     if( !findCli( cli ) )

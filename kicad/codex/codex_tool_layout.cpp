@@ -22,7 +22,7 @@
 #include <thread>
 #include <vector>
 
-#include <boost/process.hpp>
+#include "kichad_boost_process.h"
 
 #include <wx/dir.h>
 #include <wx/file.h>
@@ -1073,7 +1073,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
         timeoutSeconds = static_cast<int>( requested );
     }
 
-    namespace bp = boost::process;
+    namespace bp = KICHAD_BP;
 
     wxFileName temporaryRoot = wxFileName::DirName( wxFileName::GetTempDir() );
     temporaryRoot.AppendDir( wxS( "kichad-layout-" ) + KIID().AsString() );

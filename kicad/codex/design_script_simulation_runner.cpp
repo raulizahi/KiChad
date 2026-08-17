@@ -15,7 +15,7 @@
 
 #include <algorithm>
 #include <array>
-#include <boost/process.hpp>
+#include "kichad_boost_process.h"
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -473,7 +473,7 @@ bool runNgspice( const std::filesystem::path& aExecutable,
                  const std::filesystem::path& aNetlist,
                  const std::filesystem::path& aLog, std::string& aError )
 {
-    namespace bp = boost::process;
+    namespace bp = KICHAD_BP;
     bool finished = false;
     int exitCode = -1;
 

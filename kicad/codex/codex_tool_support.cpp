@@ -44,7 +44,7 @@
 
 #include <algorithm>
 #include <array>
-#include <boost/process.hpp>
+#include "kichad_boost_process.h"
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -1420,7 +1420,7 @@ bool validateNativeSchematicHierarchy( const wxFileName& aRootSchematic,
                                        const JSON* aResolvedSymbols,
                                        std::string& aError )
 {
-    namespace bp = boost::process;
+    namespace bp = KICHAD_BP;
 
     wxFileName cli;
 
@@ -1551,7 +1551,7 @@ bool validateNativeSchematicHierarchy( const wxFileName& aRootSchematic,
 bool runNativeKiCadCheck( const std::string& aCheck, const wxFileName& aInput,
                           std::string& aReport, std::string& aError )
 {
-    namespace bp = boost::process;
+    namespace bp = KICHAD_BP;
 
     wxFileName cli;
 
@@ -1692,7 +1692,7 @@ bool runNativeFabricationCommand( const wxFileName& aCli,
                                   const wxFileName& aLogDirectory, size_t aIndex,
                                   const std::string& aKind, std::string& aError )
 {
-    namespace bp = boost::process;
+    namespace bp = KICHAD_BP;
 
     wxFileName stdoutLog( aLogDirectory.GetFullPath(),
                           wxString::Format( wxS( "%zu.stdout" ), aIndex ) );
@@ -5304,7 +5304,9 @@ std::unique_ptr<google::protobuf::Message> newPcbItem( const std::string& aItemT
     if( aItemType == "via" )
         return std::make_unique<Via>();
     if( aItemType == "arc" )
-        return std::make_unique<Arc>();
+        // Qualified because <wingdi.h> declares a global Arc() function that
+        // otherwise wins name lookup over the unqualified type.
+        return std::make_unique<kiapi::board::types::Arc>();
     if( aItemType == "zone" || aItemType == "rule_area" )
         return std::make_unique<Zone>();
     if( aItemType == "shape" )
@@ -5539,7 +5541,7 @@ std::string pcbAnyType( const google::protobuf::Any& aItem )
         return "shape";
     if( aItem.Is<Track>() )
         return "trace";
-    if( aItem.Is<Arc>() )
+    if( aItem.Is<kiapi::board::types::Arc>() )  // qualified: see wingdi.h Arc()
         return "arc";
     if( aItem.Is<Via>() )
         return "via";
