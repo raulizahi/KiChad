@@ -384,14 +384,11 @@ bool ValidateNative( const wxFileName& aPath, std::string& aError )
         appendBoundedError( stderrLog, aError );
     }
 
-    std::error_code cleanupError;
-    const std::string utf8( temporaryRoot.GetFullPath().ToUTF8() );
-    const std::u8string cleanupPath( reinterpret_cast<const char8_t*>( utf8.data() ),
-                                     utf8.size() );
-    std::filesystem::remove_all( std::filesystem::path( cleanupPath ), cleanupError );
-
-    if( aError.empty() && cleanupError )
-        aError = "could not remove private native symbol validation directory";
+    // Best effort: the validation has already produced its answer, and a scratch directory
+    // that outlives it is harmless.  Windows keeps the tree locked for a moment after
+    // kicad-cli exits -- it wrote its config here -- so failing the whole validation on a
+    // cleanup that will succeed a few milliseconds later would reject good libraries.
+    KICHAD::RemoveDirectoryWithRetry( temporaryRoot.GetFullPath() );
 
     return aError.empty();
 }

@@ -21,6 +21,9 @@
 #define KICHAD_REMOVE_FILE_H
 
 #include <chrono>
+#include <filesystem>
+#include <string>
+#include <system_error>
 #include <thread>
 
 #include <wx/filefn.h>
@@ -73,6 +76,48 @@ inline bool RemoveFileWithRetry( const wxString& aPath )
     }
 
     return !wxFileExists( aPath );
+}
+
+
+/**
+ * Remove a directory tree, tolerating a transient Windows sharing violation.
+ *
+ * The directory counterpart of RemoveFileWithRetry().  The native symbol and footprint
+ * validators point KICAD_CONFIG_HOME at a scratch directory and let kicad-cli write into
+ * it, so on Windows the tree routinely stays locked for a moment after the child exits.
+ *
+ * @param aPath is the directory to remove.
+ * @return true if the directory is gone, either because it was removed or because it was
+ *         already absent.
+ */
+inline bool RemoveDirectoryWithRetry( const wxString& aPath )
+{
+    constexpr int  MAX_ATTEMPTS = 10;
+    constexpr auto RETRY_DELAY = std::chrono::milliseconds( 20 );
+
+    const std::string   utf8( aPath.ToUTF8() );
+    const std::u8string encoded( reinterpret_cast<const char8_t*>( utf8.data() ), utf8.size() );
+    const std::filesystem::path path( encoded );
+
+    for( int attempt = 0; attempt < MAX_ATTEMPTS; ++attempt )
+    {
+        std::error_code removeError;
+        std::filesystem::remove_all( path, removeError );
+
+        if( !removeError )
+            return true;
+
+        std::error_code existsError;
+
+        if( !std::filesystem::exists( path, existsError ) )
+            return true;
+
+        if( attempt + 1 < MAX_ATTEMPTS )
+            std::this_thread::sleep_for( RETRY_DELAY );
+    }
+
+    std::error_code existsError;
+    return !std::filesystem::exists( path, existsError );
 }
 
 } // namespace KICHAD

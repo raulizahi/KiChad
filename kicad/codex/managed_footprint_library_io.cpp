@@ -10,6 +10,7 @@
  */
 
 #include "managed_footprint_library_io.h"
+#include "kichad_remove_file.h"
 
 #include <kiid.h>
 
@@ -682,10 +683,8 @@ bool ValidateNative( const wxFileName& aPath, std::string& aError )
         appendBoundedError( stderrLog, aError );
     }
 
-    removeDirectory( temporaryRoot );
-
-    if( aError.empty() && temporaryRoot.DirExists() )
-        aError = "could not remove private native footprint validation directory";
+    // Best effort; see the matching comment in managed_symbol_library_io.cpp.
+    KICHAD::RemoveDirectoryWithRetry( temporaryRoot.GetFullPath() );
 
     return aError.empty();
 }
