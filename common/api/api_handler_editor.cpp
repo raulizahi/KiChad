@@ -204,11 +204,21 @@ HANDLER_RESULT<std::optional<KIID>> API_HANDLER_EDITOR::validateItemHeaderDocume
 
 std::optional<ApiResponseStatus> API_HANDLER_EDITOR::checkForBusy()
 {
-    if( !m_frame->CanAcceptApiCommands() )
+    wxString reason;
+
+    if( !m_frame->CanAcceptApiCommands( &reason ) )
     {
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_BUSY );
-        e.set_error_message( "KiCad is busy and cannot respond to API requests right now" );
+
+        // Name the blocker.  A client cannot see the UI, so a bare "busy" leaves it unable to
+        // tell a condition that clears on its own -- a zone fill, a track being routed -- from
+        // one that needs the user, and its only recourse is to ask them what the state is.
+        e.set_error_message(
+                reason.IsEmpty()
+                        ? "KiCad is busy and cannot respond to API requests right now"
+                        : fmt::format( "KiCad cannot respond to API requests right now: {}",
+                                       reason.ToStdString() ) );
         return e;
     }
 

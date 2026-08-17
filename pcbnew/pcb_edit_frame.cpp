@@ -3252,7 +3252,7 @@ void PCB_EDIT_FRAME::ProjectChanged()
 }
 
 
-bool PCB_EDIT_FRAME::CanAcceptApiCommands()
+bool PCB_EDIT_FRAME::CanAcceptApiCommands( wxString* aReason )
 {
     TOOL_BASE* currentTool = GetToolManager()->GetCurrentTool();
 
@@ -3261,27 +3261,50 @@ bool PCB_EDIT_FRAME::CanAcceptApiCommands()
     // while the user is actually dragging points around, though, so we can use
     // this as an initial check to prevent API actions when points are being edited.
     if( UndoRedoBlocked() )
+    {
+        if( aReason )
+            *aReason = wxS( "a point edit is in progress" );
+
         return false;
+    }
 
     // Don't allow any API use while the user is using a tool that could
     // modify the model in the middle of the message stream
     if( currentTool != GetToolManager()->GetTool<PCB_SELECTION_TOOL>() &&
         currentTool != GetToolManager()->GetTool<PCB_POINT_EDITOR>() )
     {
+        if( aReason )
+        {
+            *aReason = currentTool
+                               ? wxString::Format( wxS( "the %s tool is active" ),
+                                                   wxString::FromUTF8( currentTool->GetName() ) )
+                               : wxString( wxS( "an editing tool is active" ) );
+        }
+
         return false;
     }
 
     ZONE_FILLER_TOOL* zoneFillerTool = m_toolManager->GetTool<ZONE_FILLER_TOOL>();
 
     if( zoneFillerTool->IsBusy() )
+    {
+        if( aReason )
+            *aReason = wxS( "the zone filler is running" );
+
         return false;
+    }
 
     ROUTER_TOOL* routerTool = m_toolManager->GetTool<ROUTER_TOOL>();
 
     if( routerTool && routerTool->RoutingInProgress() )
-        return false;
+    {
+        if( aReason )
+            *aReason = wxS( "a track is being routed" );
 
-    return EDA_BASE_FRAME::CanAcceptApiCommands();
+        return false;
+    }
+
+    return EDA_BASE_FRAME::CanAcceptApiCommands( aReason );
 }
 
 

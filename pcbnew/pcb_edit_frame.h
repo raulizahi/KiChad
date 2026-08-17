@@ -696,7 +696,7 @@ public:
 
     void ProjectChanged() override;
 
-    bool CanAcceptApiCommands() override;
+    bool CanAcceptApiCommands( wxString* aReason = nullptr ) override;
 
     wxString GetCurrentFileName() const override;
 

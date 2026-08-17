@@ -641,8 +641,21 @@ public:
      *
      * A frame might not accept commands if a long-running process is underway, a dialog is open,
      * the user is interacting with a tool, etc.
+     *
+     * @param aReason, when supplied, receives a human-readable description of what is blocking
+     *                 commands.  API clients cannot see the UI, so without it they can only
+     *                 report that KiCad is busy and ask the user to guess at the cause.
      */
-    virtual bool CanAcceptApiCommands() { return IsEnabled(); }
+    virtual bool CanAcceptApiCommands( wxString* aReason = nullptr )
+    {
+        if( IsEnabled() )
+            return true;
+
+        if( aReason )
+            *aReason = wxS( "a modal dialog is open" );
+
+        return false;
+    }
 
 protected:
     /// Default style flags used for wxAUI toolbars.
