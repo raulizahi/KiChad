@@ -526,7 +526,7 @@ public:
         for( const auto& el : *m_ptr )
             js.push_back( el );
 
-        aSettings->Set<nlohmann::json>( m_path, js );
+        aSettings->SetJson( m_path, js );
     }
 
     void SetDefault() override
@@ -631,7 +631,7 @@ public:
         for( const auto& el : *m_ptr )
             js.push_back( el );
 
-        aSettings->Set<nlohmann::json>( m_path, js );
+        aSettings->SetJson( m_path, js );
     }
 
 
@@ -771,7 +771,7 @@ public:
         for( const auto& el : *m_ptr )
             js[el.first] = el.second;
 
-        aSettings->Set<nlohmann::json>( m_path, js );
+        aSettings->SetJson( m_path, js );
     }
 
     virtual void SetDefault() override

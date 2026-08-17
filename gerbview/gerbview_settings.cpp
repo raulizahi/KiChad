@@ -128,7 +128,7 @@ bool GERBVIEW_SETTINGS::MigrateFromLegacy( wxConfigBase* aCfg )
 
         aCfg->SetPath( wxT( ".." ) );
 
-        Set( aDest, js );
+        SetJson( aDest, js );
     };
 
     migrate_files( "drl_files", "system.drill_file_history" );
@@ -139,7 +139,7 @@ bool GERBVIEW_SETTINGS::MigrateFromLegacy( wxConfigBase* aCfg )
         wxString key;
         int value = 0;
 
-        Set( "gerber_to_pcb_layers", nlohmann::json::array() );
+        SetJson( "gerber_to_pcb_layers", nlohmann::json::array() );
 
         for( int i = 0; i < GERBER_DRAWLAYERS_COUNT; i++ )
         {

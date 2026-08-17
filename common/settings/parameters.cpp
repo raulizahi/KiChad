@@ -32,7 +32,7 @@ void PARAM_PATH_LIST::Store( JSON_SETTINGS* aSettings ) const
     for( const auto& el : *m_ptr )
         js.push_back( toFileFormat( el ) );
 
-    aSettings->Set<nlohmann::json>( m_path, js );
+    aSettings->SetJson( m_path, js );
 }
 
 
@@ -87,7 +87,7 @@ void PARAM_WXSTRING_MAP::Store( JSON_SETTINGS* aSettings ) const
         js[key] = el.second;
     }
 
-    aSettings->Set<nlohmann::json>( m_path, js );
+    aSettings->SetJson( m_path, js );
 }
 
 

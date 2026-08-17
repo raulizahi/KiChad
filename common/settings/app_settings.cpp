@@ -335,7 +335,7 @@ bool APP_SETTINGS_BASE::MigrateFromLegacy( wxConfigBase* aCfg )
                 js.push_back( i );
         }
 
-        Set( "printing.layers", js );
+        SetJson( "printing.layers", js );
     }
 
     ret &= fromLegacy<bool>(   aCfg, f + "FirstRunShown",       "system.first_run_shown" );
@@ -356,7 +356,7 @@ bool APP_SETTINGS_BASE::MigrateFromLegacy( wxConfigBase* aCfg )
                 js.push_back( file.ToStdString() );
         }
 
-        Set( "system.file_history", js );
+        SetJson( "system.file_history", js );
     }
 
     ret &= migrateWindowConfig( aCfg, f, "window" );
@@ -672,7 +672,7 @@ bool APP_SETTINGS_BASE::migrateLibTreeWidth()
     // two possible columns.
     if( std::optional<int> optWidth = Get<int>( "lib_tree.column_width" ) )
     {
-        Set<nlohmann::json>( "lib_tree.column_widths", { { "Item", *optWidth } } );
+        SetJson( "lib_tree.column_widths", { { "Item", *optWidth } } );
         At( "lib_tree" ).erase( "column_width" );
     }
 

@@ -588,6 +588,12 @@ bool JSON_SETTINGS::LoadFromRawFile( const wxString& aPath )
 }
 
 
+void JSON_SETTINGS::SetJson( const std::string& aPath, const nlohmann::json& aValue )
+{
+    Set<nlohmann::json>( aPath, aValue );
+}
+
+
 std::optional<nlohmann::json> JSON_SETTINGS::GetJson( const std::string& aPath ) const
 {
     nlohmann::json::json_pointer ptr = m_internals->PointerFromString( aPath );
@@ -639,8 +645,12 @@ template KICOMMON_API std::optional<unsigned long long>
                       JSON_SETTINGS::Get<unsigned long long>( const std::string& aPath ) const;
 template KICOMMON_API std::optional<std::string>
                       JSON_SETTINGS::Get<std::string>( const std::string& aPath ) const;
-template KICOMMON_API std::optional<nlohmann::json>
-                      JSON_SETTINGS::Get<nlohmann::json>( const std::string& aPath ) const;
+// Not KICOMMON_API: exporting a json instantiation also exports nlohmann's inline
+// members, which collide with the copies emitted by every other binary that uses
+// nlohmann directly.  Kept as an explicit instantiation so kicommon's own
+// translation units still link; external callers use GetJson()/SetJson().
+template std::optional<nlohmann::json>
+JSON_SETTINGS::Get<nlohmann::json>( const std::string& aPath ) const;
 template KICOMMON_API std::optional<KIGFX::COLOR4D>
                       JSON_SETTINGS::Get<KIGFX::COLOR4D>( const std::string& aPath ) const;
 template KICOMMON_API std::optional<BOM_FIELD>
@@ -682,8 +692,9 @@ template KICOMMON_API void JSON_SETTINGS::Set<const char*>( const std::string& a
                                                             const char*        aValue );
 template KICOMMON_API void JSON_SETTINGS::Set<std::string>( const std::string& aPath,
                                                             std::string        aValue );
-template KICOMMON_API void JSON_SETTINGS::Set<nlohmann::json>( const std::string& aPath,
-                                                               nlohmann::json     aValue );
+// Not KICOMMON_API; see the Get<nlohmann::json> instantiation above.
+template void JSON_SETTINGS::Set<nlohmann::json>( const std::string& aPath,
+                                                  nlohmann::json     aValue );
 template KICOMMON_API void JSON_SETTINGS::Set<KIGFX::COLOR4D>( const std::string& aPath,
                                                                KIGFX::COLOR4D     aValue );
 template KICOMMON_API void JSON_SETTINGS::Set<BOM_FIELD>( const std::string& aPath,

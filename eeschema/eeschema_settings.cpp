@@ -777,8 +777,8 @@ bool EESCHEMA_SETTINGS::MigrateFromLegacy( wxConfigBase* aCfg )
             }
         }
 
-        Set( "netlist.custom_command_titles", js_title );
-        Set( "netlist.custom_command_paths", js_cmd );
+        SetJson( "netlist.custom_command_titles", js_title );
+        SetJson( "netlist.custom_command_paths", js_cmd );
     }
     #endif
 
@@ -811,7 +811,7 @@ bool EESCHEMA_SETTINGS::MigrateFromLegacy( wxConfigBase* aCfg )
             }
         }
 
-        Set( "field_editor.fields_show", js );
+        SetJson( "field_editor.fields_show", js );
 
         aCfg->SetPath( "../GroupBy" );
 
@@ -832,7 +832,7 @@ bool EESCHEMA_SETTINGS::MigrateFromLegacy( wxConfigBase* aCfg )
             }
         }
 
-        Set( "field_editor.fields_group_by", js );
+        SetJson( "field_editor.fields_group_by", js );
 
         aCfg->SetPath( "../.." );
     }

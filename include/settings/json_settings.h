@@ -148,6 +148,20 @@ public:
     std::optional<nlohmann::json> GetJson( const std::string& aPath ) const;
 
     /**
+     * Stores a JSON value into the JSON document.
+     *
+     * Prefer this over Set<nlohmann::json>(): the templated form is not exported from
+     * kicommon, because dllexporting a json instantiation drags nlohmann's inline
+     * members into kicommon's export table, and every binary that also uses nlohmann
+     * directly then hits LNK2005 on those members.  This non-template entry point
+     * keeps them private to the DLL.
+     *
+     * @param aPath is a path to store in the form "key1.key2.key3"
+     * @param aValue is the JSON value to store
+     */
+    void SetJson( const std::string& aPath, const nlohmann::json& aValue );
+
+    /**
      * Fetches a value from within the JSON document.
      * Will return an empty optional if the value is not found or a mismatching type.
      * @tparam ValueType is the type to cast to
@@ -379,7 +393,8 @@ extern template std::optional<int>    JSON_SETTINGS::Get<int>( const std::string
 extern template std::optional<unsigned int> JSON_SETTINGS::Get<unsigned int>( const std::string& aPath ) const;
 extern template std::optional<unsigned long long> JSON_SETTINGS::Get<unsigned long long>( const std::string& aPath ) const;
 extern template std::optional<std::string> JSON_SETTINGS::Get<std::string>( const std::string& aPath ) const;
-extern template std::optional<nlohmann::json> JSON_SETTINGS::Get<nlohmann::json>( const std::string& aPath ) const;
+// Get<nlohmann::json>/Set<nlohmann::json> are deliberately absent here: they are not
+// exported from kicommon (see SetJson above).  Use GetJson()/SetJson() instead.
 extern template std::optional<KIGFX::COLOR4D> JSON_SETTINGS::Get<KIGFX::COLOR4D>( const std::string& aPath ) const;
 extern template std::optional<BOM_FIELD> JSON_SETTINGS::Get<BOM_FIELD>( const std::string& aPath ) const;
 extern template std::optional<BOM_PRESET> JSON_SETTINGS::Get<BOM_PRESET>( const std::string& aPath ) const;

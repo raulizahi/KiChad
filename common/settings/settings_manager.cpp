@@ -130,7 +130,7 @@ void SETTINGS_MANAGER::ClearFileHistory()
         if( settings->GetLocation() == SETTINGS_LOC::USER )
         {
             for( const auto& [path, history] : settings->GetFileHistories() )
-                settings->Set( path, nlohmann::json::array() );
+                settings->SetJson( path, nlohmann::json::array() );
 
             settings->SaveToFile( GetPathForSettingsFile( settings.get() ) );
         }

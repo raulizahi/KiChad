@@ -475,7 +475,7 @@ bool PCBNEW_SETTINGS::MigrateFromLegacy( wxConfigBase* aCfg )
                 js.push_back( i );
         }
 
-        Set( "export_svg.layers", js );
+        SetJson( "export_svg.layers", js );
     }
 
     {
@@ -506,7 +506,7 @@ bool PCBNEW_SETTINGS::MigrateFromLegacy( wxConfigBase* aCfg )
             }
         }
 
-        Set( "action_plugins", js );
+        SetJson( "action_plugins", js );
     }
 
     //
@@ -540,7 +540,7 @@ bool PCBNEW_SETTINGS::MigrateFromLegacy( wxConfigBase* aCfg )
 
     const std::string p = "pcbnew.InteractiveRouter.";
 
-    Set( "tools.pns.meta", nlohmann::json( {
+    SetJson( "tools.pns.meta", nlohmann::json( {
                                                { "filename", "pns" },
                                                { "version", 0 }
                                            } ) );
