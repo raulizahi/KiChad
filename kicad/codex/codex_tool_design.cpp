@@ -10,6 +10,7 @@
  */
 
 #include "kichad_protobuf_compat.h"
+#include "kichad_remove_file.h"
 #include "codex_tool_registry.h"
 
 #include "codex_tool_internal.h"
@@ -2807,7 +2808,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
                 return failure( "state_write_failed", message );
             }
 
-            const bool journalRemoved = wxRemoveFile( journalPath.GetFullPath() );
+            const bool journalRemoved = KICHAD::RemoveFileWithRetry( journalPath.GetFullPath() );
             JSON payload = { { "operation", "apply" },
                              { "path", sourceRelativePath },
                              { "boardPath", boardRelativePath },
@@ -2908,7 +2909,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
                                         "reconciled safely on the next apply" );
         }
 
-        const bool journalRemoved = wxRemoveFile( journalPath.GetFullPath() );
+        const bool journalRemoved = KICHAD::RemoveFileWithRetry( journalPath.GetFullPath() );
         JSON payload = { { "operation", "apply" },
                          { "path", sourceRelativePath },
                          { "boardPath", boardRelativePath },

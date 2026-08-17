@@ -10,6 +10,7 @@
  */
 
 #include "codex_thread_store.h"
+#include "kichad_remove_file.h"
 #include "codex_paths.h"
 
 #include <nlohmann/json.hpp>
@@ -160,7 +161,7 @@ bool CODEX_THREAD_STORE::Save( const wxString& aProjectPath, const BINDING& aBin
         || !temporary.Flush() )
     {
         temporary.Close();
-        wxRemoveFile( temporaryPath );
+        KICHAD::RemoveFileWithRetry( temporaryPath );
 
         if( aError )
             *aError = _( "Could not write the KiChad Codex conversation index." );
@@ -172,7 +173,7 @@ bool CODEX_THREAD_STORE::Save( const wxString& aProjectPath, const BINDING& aBin
 
     if( !wxRenameFile( temporaryPath, path, true ) )
     {
-        wxRemoveFile( temporaryPath );
+        KICHAD::RemoveFileWithRetry( temporaryPath );
 
         if( aError )
             *aError = _( "Could not atomically update the KiChad Codex conversation index." );
@@ -224,7 +225,7 @@ bool CODEX_THREAD_STORE::Clear( const wxString& aProjectPath, wxString* aError )
         || !temporary.Flush() )
     {
         temporary.Close();
-        wxRemoveFile( temporaryPath );
+        KICHAD::RemoveFileWithRetry( temporaryPath );
 
         if( aError )
             *aError = _( "Could not update the KiChad Codex conversation index." );
@@ -236,7 +237,7 @@ bool CODEX_THREAD_STORE::Clear( const wxString& aProjectPath, wxString* aError )
 
     if( !wxRenameFile( temporaryPath, path, true ) )
     {
-        wxRemoveFile( temporaryPath );
+        KICHAD::RemoveFileWithRetry( temporaryPath );
 
         if( aError )
             *aError = _( "Could not atomically update the KiChad Codex conversation index." );

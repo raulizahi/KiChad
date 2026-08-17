@@ -10,6 +10,7 @@
  */
 
 #include "codex_tool_registry.h"
+#include "kichad_remove_file.h"
 #include "codex_tool_internal.h"
 
 #include "lossless_sexpr_document.h"
@@ -1046,7 +1047,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleInspect(
         while( hasStale )
         {
             if( !currentNames.contains( staleName )
-                && wxRemoveFile( wxFileName( previewDirectory.GetFullPath(),
+                && KICHAD::RemoveFileWithRetry( wxFileName( previewDirectory.GetFullPath(),
                                              staleName ).GetFullPath() ) )
             {
                 ++removed;

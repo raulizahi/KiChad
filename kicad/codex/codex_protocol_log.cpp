@@ -10,6 +10,7 @@
  */
 
 #include "codex_protocol_log.h"
+#include "kichad_remove_file.h"
 
 #include "codex_paths.h"
 
@@ -88,7 +89,7 @@ void rotateIfNeeded( const wxString& aPath )
     const wxString previous = aPath + wxS( ".1" );
 
     if( wxFileName::FileExists( previous ) )
-        wxRemoveFile( previous );
+        KICHAD::RemoveFileWithRetry( previous );
 
     wxRenameFile( aPath, previous, true );
 }

@@ -10,6 +10,7 @@
  */
 
 #include "kichad_protobuf_compat.h"
+#include "kichad_remove_file.h"
 #include "codex_tool_internal.h"
 #include "board_render_artifact_validator.h"
 #include "board_ps_artifact_validator.h"
@@ -451,7 +452,7 @@ bool installTextFileAtomically( const wxFileName& aPath, bool aPresent,
 {
     if( !aPresent )
     {
-        if( aPath.FileExists() && !wxRemoveFile( aPath.GetFullPath() ) )
+        if( aPath.FileExists() && !KICHAD::RemoveFileWithRetry( aPath.GetFullPath() ) )
         {
             aError = "could not remove the project library table during rollback";
             return false;
@@ -481,7 +482,7 @@ bool installTextFileAtomically( const wxFileName& aPath, bool aPresent,
         || !temporary.Flush() )
     {
         temporary.Close();
-        wxRemoveFile( temporaryPath );
+        KICHAD::RemoveFileWithRetry( temporaryPath );
         aError = "could not durably write the project library table";
         return false;
     }
@@ -490,7 +491,7 @@ bool installTextFileAtomically( const wxFileName& aPath, bool aPresent,
 
     if( !wxRenameFile( temporaryPath, aPath.GetFullPath(), true ) )
     {
-        wxRemoveFile( temporaryPath );
+        KICHAD::RemoveFileWithRetry( temporaryPath );
         aError = "could not atomically install the project library table";
         return false;
     }
@@ -1249,7 +1250,7 @@ bool installSchematicAtomically( const wxFileName& aPath, bool aPresent,
 {
     if( !aPresent )
     {
-        if( aPath.FileExists() && !wxRemoveFile( aPath.GetFullPath() ) )
+        if( aPath.FileExists() && !KICHAD::RemoveFileWithRetry( aPath.GetFullPath() ) )
         {
             aError = "could not remove newly created schematic during rollback";
             return false;
@@ -1279,7 +1280,7 @@ bool installSchematicAtomically( const wxFileName& aPath, bool aPresent,
         || !temporary.Flush() )
     {
         temporary.Close();
-        wxRemoveFile( temporaryPath );
+        KICHAD::RemoveFileWithRetry( temporaryPath );
         aError = "could not durably write managed schematic temporary data";
         return false;
     }
@@ -1288,7 +1289,7 @@ bool installSchematicAtomically( const wxFileName& aPath, bool aPresent,
 
     if( !wxRenameFile( temporaryPath, aPath.GetFullPath(), true ) )
     {
-        wxRemoveFile( temporaryPath );
+        KICHAD::RemoveFileWithRetry( temporaryPath );
         aError = "could not atomically install managed schematic";
         return false;
     }
@@ -1536,13 +1537,13 @@ bool validateNativeSchematicHierarchy( const wxFileName& aRootSchematic,
     }
 
     if( output.FileExists() )
-        wxRemoveFile( output.GetFullPath() );
+        KICHAD::RemoveFileWithRetry( output.GetFullPath() );
 
     if( stdoutLog.FileExists() )
-        wxRemoveFile( stdoutLog.GetFullPath() );
+        KICHAD::RemoveFileWithRetry( stdoutLog.GetFullPath() );
 
     if( stderrLog.FileExists() )
-        wxRemoveFile( stderrLog.GetFullPath() );
+        KICHAD::RemoveFileWithRetry( stderrLog.GetFullPath() );
 
     return aError.empty();
 }
@@ -1875,7 +1876,7 @@ bool runNativeKiCadPreview( const std::string& aView, const wxFileName& aInput,
             return false;
         }
 
-        if( aOutputs[i].FileExists() && !wxRemoveFile( aOutputs[i].GetFullPath() ) )
+        if( aOutputs[i].FileExists() && !KICHAD::RemoveFileWithRetry( aOutputs[i].GetFullPath() ) )
         {
             aError = "could not replace the prior derived preview";
             return false;
@@ -2023,7 +2024,7 @@ bool runNativeKiCadPreview( const std::string& aView, const wxFileName& aInput,
             for( const wxFileName& output : aOutputs )
             {
                 if( output.FileExists() )
-                    wxRemoveFile( output.GetFullPath() );
+                    KICHAD::RemoveFileWithRetry( output.GetFullPath() );
             }
 
             return false;
@@ -5007,7 +5008,7 @@ bool installDesignScriptSidecarAtomically( const wxFileName& aFile,
         || !temporary.Flush() )
     {
         temporary.Close();
-        wxRemoveFile( temporaryPath );
+        KICHAD::RemoveFileWithRetry( temporaryPath );
         aError = "could not durably write the KiChad Design Script sidecar";
         return false;
     }
@@ -5016,7 +5017,7 @@ bool installDesignScriptSidecarAtomically( const wxFileName& aFile,
 
     if( !wxRenameFile( temporaryPath, aFile.GetFullPath(), true ) )
     {
-        wxRemoveFile( temporaryPath );
+        KICHAD::RemoveFileWithRetry( temporaryPath );
         aError = "could not atomically install the KiChad Design Script sidecar";
         return false;
     }
@@ -5097,7 +5098,7 @@ bool writeJsonAtomically( const wxFileName& aPath, const nlohmann::json& aDocume
         || !temporary.Flush() )
     {
         temporary.Close();
-        wxRemoveFile( temporaryPath );
+        KICHAD::RemoveFileWithRetry( temporaryPath );
         aError = "could not durably write KiChad managed-state data";
         return false;
     }
@@ -5106,7 +5107,7 @@ bool writeJsonAtomically( const wxFileName& aPath, const nlohmann::json& aDocume
 
     if( !wxRenameFile( temporaryPath, aPath.GetFullPath(), true ) )
     {
-        wxRemoveFile( temporaryPath );
+        KICHAD::RemoveFileWithRetry( temporaryPath );
         aError = "could not atomically install KiChad managed-state data";
         return false;
     }

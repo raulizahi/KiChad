@@ -1,0 +1,80 @@
+/*
+ * This program source code file is part of KiCad, a free EDA CAD application.
+ *
+ * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the
+ * Free Software Foundation, either version 3 of the License, or (at your
+ * option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along
+ * with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef KICHAD_REMOVE_FILE_H
+#define KICHAD_REMOVE_FILE_H
+
+#include <chrono>
+#include <thread>
+
+#include <wx/filefn.h>
+#include <wx/log.h>
+#include <wx/string.h>
+
+namespace KICHAD
+{
+
+/**
+ * Remove a file, tolerating a transient Windows sharing violation.
+ *
+ * POSIX allows a file to be unlinked while handles to it are still open, so removing a
+ * scratch file immediately after the process that wrote it always succeeds.  Windows
+ * refuses with ERROR_SHARING_VIOLATION until every handle is closed, and a file that was
+ * just written is routinely held for a short spell by a virus scanner or the search
+ * indexer, as well as by a child process that has not finished exiting.  The redirected
+ * stdout and stderr of the kicad-cli helpers hit exactly that window.
+ *
+ * Retry briefly instead of failing on the first attempt.  wxRemoveFile() logs a system
+ * error each time it fails, which reaches the user as an error dialog about a scratch
+ * file they can do nothing about, so the attempts are made with logging suppressed and
+ * only the final outcome is reported to the caller.
+ *
+ * @param aPath is the file to remove.
+ * @return true if the file is gone, either because it was removed or because it was
+ *         already absent.
+ */
+inline bool RemoveFileWithRetry( const wxString& aPath )
+{
+    constexpr int  MAX_ATTEMPTS = 10;
+    constexpr auto RETRY_DELAY = std::chrono::milliseconds( 20 );
+
+    for( int attempt = 0; attempt < MAX_ATTEMPTS; ++attempt )
+    {
+        {
+            wxLogNull suppressTransientFailures;
+
+            if( wxRemoveFile( aPath ) )
+                return true;
+        }
+
+        // A concurrent remover, or a delete that Windows has already committed, leaves
+        // nothing to retry.
+        if( !wxFileExists( aPath ) )
+            return true;
+
+        if( attempt + 1 < MAX_ATTEMPTS )
+            std::this_thread::sleep_for( RETRY_DELAY );
+    }
+
+    return !wxFileExists( aPath );
+}
+
+} // namespace KICHAD
+
+#endif // KICHAD_REMOVE_FILE_H

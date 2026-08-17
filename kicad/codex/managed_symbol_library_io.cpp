@@ -10,6 +10,7 @@
  */
 
 #include "managed_symbol_library_io.h"
+#include "kichad_remove_file.h"
 
 #include <kiid.h>
 
@@ -242,7 +243,7 @@ bool InstallAtomically( const wxFileName& aPath, bool aPresent, const std::strin
 {
     if( !aPresent )
     {
-        if( aPath.FileExists() && !wxRemoveFile( aPath.GetFullPath() ) )
+        if( aPath.FileExists() && !KICHAD::RemoveFileWithRetry( aPath.GetFullPath() ) )
         {
             aError = "could not remove newly created managed symbol library during rollback";
             return false;
@@ -272,7 +273,7 @@ bool InstallAtomically( const wxFileName& aPath, bool aPresent, const std::strin
         || !temporary.Flush() )
     {
         temporary.Close();
-        wxRemoveFile( temporaryPath );
+        KICHAD::RemoveFileWithRetry( temporaryPath );
         aError = "could not durably write managed symbol library";
         return false;
     }
@@ -281,7 +282,7 @@ bool InstallAtomically( const wxFileName& aPath, bool aPresent, const std::strin
 
     if( !wxRenameFile( temporaryPath, aPath.GetFullPath(), true ) )
     {
-        wxRemoveFile( temporaryPath );
+        KICHAD::RemoveFileWithRetry( temporaryPath );
         aError = "could not atomically install managed symbol library";
         return false;
     }
