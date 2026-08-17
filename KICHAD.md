@@ -94,6 +94,9 @@ Notes on the sample:
 - Dependencies come from vcpkg in manifest mode against the tracked `vcpkg.json`.  Edit the
   preset's `VCPKG_ROOT` to your vcpkg checkout, or drop that `environment` block and export
   `VCPKG_ROOT` yourself.  The first configure builds the whole dependency set and takes hours.
+  `VCPKG_INSTALL_OPTIONS` passes `--clean-buildtrees-after-build` so each port's intermediates are
+  dropped once it installs, holding peak disk near `installed/` plus one in-flight port; drop it if
+  you would rather keep the trees for faster single-port rebuilds.
 - Build from a Visual Studio x64 developer shell so MSVC, the Windows SDK, and `ninja` are on
   `PATH`.  `/bigobj` is already applied for MSVC by the top-level `CMakeLists.txt`, which the
   larger `kicad/codex` translation units need.

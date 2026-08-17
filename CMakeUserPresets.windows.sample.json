@@ -25,6 +25,7 @@
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_INSTALL_PREFIX": "${sourceDir}/build/install-windows",
         "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "VCPKG_INSTALL_OPTIONS": "--clean-buildtrees-after-build",
         "KICAD_BUILD_I18N": "OFF",
         "KICAD_BUILD_QA_TESTS": "ON",
         "KICAD_CONFIG_DIR": "kichad",
