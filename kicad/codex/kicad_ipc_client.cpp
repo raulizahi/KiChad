@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <filesystem>
 #include <thread>
 #include <vector>
@@ -298,8 +299,37 @@ bool KICHAD_IPC_CLIENT::Call( const KICHAD_IPC_TARGET& aTarget,
                               kiapi::common::ApiResponse& aResponse,
                               std::string& aError ) const
 {
-    return callSocket( aTarget.socketUrl, aTarget.kicadToken, aRequest, aResponse, aError,
-                       m_timeout );
+    // Every condition that makes KiCad report AS_BUSY ends on its own: a zone fill finishes, a
+    // track gets routed, a point edit is released, a transient tool returns to selection.  Wait
+    // for them rather than failing the request, because the caller's only other recourse is to
+    // ask the user to clear a state that was about to clear itself.  A guarded apply keeps its
+    // recovery journal, so arriving late is safe.
+    //
+    // Tool dispatch runs on a worker thread, so blocking here leaves the UI responsive and lets
+    // the user finish whatever is holding the editor.
+    constexpr auto BUSY_BUDGET = std::chrono::seconds( 30 );
+    constexpr auto BUSY_POLL_INTERVAL = std::chrono::milliseconds( 200 );
+
+    const auto deadline = std::chrono::steady_clock::now() + BUSY_BUDGET;
+
+    for( ;; )
+    {
+        if( callSocket( aTarget.socketUrl, aTarget.kicadToken, aRequest, aResponse, aError,
+                        m_timeout ) )
+        {
+            return true;
+        }
+
+        // callSocket() reports every non-OK status as a failure, so the response carries the
+        // reason.  Only a busy editor is worth waiting on; anything else is final.
+        if( aResponse.status().status() != kiapi::common::AS_BUSY
+            || std::chrono::steady_clock::now() >= deadline )
+        {
+            return false;
+        }
+
+        std::this_thread::sleep_for( BUSY_POLL_INTERVAL );
+    }
 }
 
 
