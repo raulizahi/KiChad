@@ -2268,7 +2268,14 @@ bool runNativeKiCadFabrication( const wxFileName& aBoard,
         }
     }
 
-    std::filesystem::remove_all( logs, filesystemError );
+    // The staging validator only accepts the directories the fabrication plan declares, so a
+    // surviving .native-logs makes a complete, valid package fail as "an unexpected directory".
+    // kicad-cli has just written into it, so on Windows the removal needs a retry -- and if it
+    // genuinely cannot be removed, say so here rather than letting the validator report a
+    // misleading cause.
+    if( !KICHAD::RemoveDirectoryWithRetry( logDirectory.GetFullPath() ) && aError.empty() )
+        aError = "could not remove the private native fabrication logs";
+
     return aError.empty();
 }
 
