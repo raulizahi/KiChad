@@ -43,6 +43,7 @@
 #include <api/api_utils.h>
 #include <project/net_settings.h>
 #include <project/project_file.h>
+#include <settings/api_project_settings.h>
 #include <settings/settings_manager.h>
 #include <wx/string.h>
 
@@ -114,7 +115,8 @@ bool saveProjectSettings( PROJECT& aProject )
 
 
 bool decodeSchematicFieldTemplates( const project::SchematicFieldTemplates& aTemplates,
-                                    nlohmann::json& aDecoded, std::string& aError )
+                                    std::vector<SCHEMATIC_FIELD_TEMPLATE_ENTRY>& aDecoded,
+                                    std::string& aError )
 {
     if( aTemplates.fields_size() > static_cast<int>( MAX_SCHEMATIC_FIELD_TEMPLATES ) )
     {
@@ -126,7 +128,7 @@ bool decodeSchematicFieldTemplates( const project::SchematicFieldTemplates& aTem
         "reference", "value", "footprint", "datasheet", "description"
     };
     std::set<std::string> names;
-    aDecoded = nlohmann::json::array();
+    aDecoded.clear();
 
     for( const project::SchematicFieldTemplate& field : aTemplates.fields() )
     {
@@ -156,9 +158,7 @@ bool decodeSchematicFieldTemplates( const project::SchematicFieldTemplates& aTem
             return false;
         }
 
-        aDecoded.push_back( { { "name", name },
-                              { "visible", field.visible() },
-                              { "url", field.url() } } );
+        aDecoded.push_back( { name, field.visible(), field.url() } );
     }
 
     return true;
@@ -169,36 +169,29 @@ bool encodeSchematicFieldTemplates( const PROJECT_FILE& aProjectFile,
                                     project::SchematicFieldTemplates& aTemplates,
                                     std::string& aError )
 {
-    const std::optional<nlohmann::json> stored =
-            aProjectFile.GetJson( "schematic.drawing.field_names" );
+    std::vector<SCHEMATIC_FIELD_TEMPLATE_ENTRY> stored;
 
-    if( !stored )
+    if( !LoadSchematicFieldTemplates( aProjectFile, stored, aError ) )
+        return false;
+
+    if( stored.empty() )
         return true;
 
-    if( !stored->is_array() || stored->size() > MAX_SCHEMATIC_FIELD_TEMPLATES )
+    if( stored.size() > MAX_SCHEMATIC_FIELD_TEMPLATES )
     {
         aError = "project contains invalid schematic field templates";
         return false;
     }
 
-    for( const nlohmann::json& entry : *stored )
+    for( const SCHEMATIC_FIELD_TEMPLATE_ENTRY& entry : stored )
     {
-        if( !entry.is_object() || entry.size() != 3 || !entry.contains( "name" )
-            || !entry["name"].is_string() || !entry.contains( "visible" )
-            || !entry["visible"].is_boolean() || !entry.contains( "url" )
-            || !entry["url"].is_boolean() )
-        {
-            aError = "project contains invalid schematic field templates";
-            return false;
-        }
-
         project::SchematicFieldTemplate* field = aTemplates.add_fields();
-        field->set_name( entry["name"].get<std::string>() );
-        field->set_visible( entry["visible"].get<bool>() );
-        field->set_url( entry["url"].get<bool>() );
+        field->set_name( entry.name );
+        field->set_visible( entry.visible );
+        field->set_url( entry.url );
     }
 
-    nlohmann::json validated;
+    std::vector<SCHEMATIC_FIELD_TEMPLATE_ENTRY> validated;
 
     if( !decodeSchematicFieldTemplates( aTemplates, validated, aError ) )
     {
@@ -1194,8 +1187,8 @@ API_HANDLER_COMMON::handleSetSchematicFieldTemplates(
         return tl::unexpected( error );
     }
 
-    nlohmann::json decoded;
-    std::string    decodeError;
+    std::vector<SCHEMATIC_FIELD_TEMPLATE_ENTRY> decoded;
+    std::string                                 decodeError;
 
     if( !aCtx.Request.has_templates()
         || !decodeSchematicFieldTemplates( aCtx.Request.templates(), decoded, decodeError ) )
@@ -1208,17 +1201,16 @@ API_HANDLER_COMMON::handleSetSchematicFieldTemplates(
     }
 
     PROJECT_FILE& projectFile = project.GetProjectFile();
-    const nlohmann::json previous =
-            projectFile.GetJson( "schematic.drawing.field_names" )
-                    .value_or( nlohmann::json::array() );
-    projectFile.Set<nlohmann::json>( "schematic.drawing.field_names", std::move( decoded ) );
+    const std::string previous =
+            SnapshotProjectJson( projectFile, "schematic.drawing.field_names", "[]" );
+    StoreSchematicFieldTemplates( projectFile, decoded );
 
     if( m_onProjectSettingsChanged )
         m_onProjectSettingsChanged( APIPSC_FIELD_TEMPLATES );
 
     if( !saveProjectSettings( project ) )
     {
-        projectFile.Set<nlohmann::json>( "schematic.drawing.field_names", previous );
+        RestoreProjectJson( projectFile, "schematic.drawing.field_names", previous );
 
         if( m_onProjectSettingsChanged )
             m_onProjectSettingsChanged( APIPSC_FIELD_TEMPLATES );
@@ -1269,12 +1261,20 @@ API_HANDLER_COMMON::handleGetSchematicRuleSeverities(
         return tl::unexpected( error );
     }
 
-    const nlohmann::json active = project.GetProjectFile()
-                                          .GetJson( "erc.rule_severities" )
-                                          .value_or( nlohmann::json::object() );
+    std::vector<SCHEMATIC_RULE_SEVERITY_ENTRY> active;
+    std::string                                loadError;
+
+    if( !LoadSchematicRuleSeverities( project.GetProjectFile(), active, loadError ) )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( loadError );
+        return tl::unexpected( error );
+    }
+
     project::SchematicRuleSeverities reply;
 
-    if( !active.is_object() || active.size() > MAX_SCHEMATIC_RULE_SEVERITIES )
+    if( active.size() > MAX_SCHEMATIC_RULE_SEVERITIES )
     {
         ApiResponseStatus error;
         error.set_status( ApiStatusCode::AS_BAD_REQUEST );
@@ -1282,17 +1282,9 @@ API_HANDLER_COMMON::handleGetSchematicRuleSeverities(
         return tl::unexpected( error );
     }
 
-    for( auto entry = active.begin(); entry != active.end(); ++entry )
+    for( const SCHEMATIC_RULE_SEVERITY_ENTRY& entry : active )
     {
-        if( !entry.value().is_string() )
-        {
-            ApiResponseStatus error;
-            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
-            error.set_error_message( "project ERC severity settings contain a non-string value" );
-            return tl::unexpected( error );
-        }
-
-        const std::string value = entry.value().get<std::string>();
+        const std::string&                 value = entry.second;
         const project::ProjectRuleSeverity severity =
                 value == "error" ? project::PRS_ERROR
                 : value == "warning" ? project::PRS_WARNING
@@ -1307,7 +1299,7 @@ API_HANDLER_COMMON::handleGetSchematicRuleSeverities(
             return tl::unexpected( error );
         }
 
-        ( *reply.mutable_severities() )[entry.key()] = severity;
+        ( *reply.mutable_severities() )[entry.first] = severity;
     }
 
     return reply;
@@ -1345,7 +1337,7 @@ API_HANDLER_COMMON::handleSetSchematicRuleSeverities(
         return tl::unexpected( error );
     }
 
-    nlohmann::json decoded = nlohmann::json::object();
+    std::vector<SCHEMATIC_RULE_SEVERITY_ENTRY> decoded;
 
     for( const auto& [key, severity] : aCtx.Request.severities().severities() )
     {
@@ -1369,20 +1361,20 @@ API_HANDLER_COMMON::handleSetSchematicRuleSeverities(
             return tl::unexpected( error );
         }
 
-        decoded[key] = value;
+        decoded.emplace_back( key, value );
     }
 
-    PROJECT_FILE& projectFile = project.GetProjectFile();
-    const nlohmann::json previous = projectFile.GetJson( "erc.rule_severities" )
-                                               .value_or( nlohmann::json::object() );
-    projectFile.Set<nlohmann::json>( "erc.rule_severities", std::move( decoded ) );
+    PROJECT_FILE&     projectFile = project.GetProjectFile();
+    const std::string previous =
+            SnapshotProjectJson( projectFile, "erc.rule_severities", "{}" );
+    StoreSchematicRuleSeverities( projectFile, decoded );
 
     if( m_onProjectSettingsChanged )
         m_onProjectSettingsChanged( APIPSC_ERC_SEVERITIES );
 
     if( !saveProjectSettings( project ) )
     {
-        projectFile.Set<nlohmann::json>( "erc.rule_severities", previous );
+        RestoreProjectJson( projectFile, "erc.rule_severities", previous );
 
         if( m_onProjectSettingsChanged )
             m_onProjectSettingsChanged( APIPSC_ERC_SEVERITIES );

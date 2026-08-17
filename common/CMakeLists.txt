@@ -175,6 +175,7 @@ set( KICOMMON_SRCS
     libraries/library_table.cpp
     libraries/library_table_parser.cpp
 
+    settings/api_project_settings.cpp
     settings/app_settings.cpp
     settings/aui_settings.cpp
     settings/bom_settings.cpp
