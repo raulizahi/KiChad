@@ -310,10 +310,16 @@ target_link_libraries( qa_common
     kinng
     kiapi
     Boost::headers
+    Boost::filesystem
     Boost::unit_test_framework
     ${wxWidgets_LIBRARIES}
     ZLIB::ZLIB
     )
+
+if( MSVC )
+    # Same nlohmann duplicate-symbol situation as the kicad target; see kicad/CMakeLists.txt.
+    target_link_options( qa_common PRIVATE /FORCE:MULTIPLE )
+endif()
 
 if( TARGET api_schema_build_copy )
     add_dependencies( qa_common api_schema_build_copy )

@@ -274,6 +274,7 @@ if( APPLE )
         kicommon
         kinng
         kiapi
+        Boost::filesystem
         core
         ${wxWidgets_LIBRARIES}
         )
@@ -299,6 +300,7 @@ else()
         kicommon
         kinng
         kiapi
+        Boost::filesystem
         core
         ${wxWidgets_LIBRARIES}
         )
@@ -318,6 +320,18 @@ endif()
 target_link_libraries( kicad ZLIB::ZLIB )
 target_link_libraries( kicad pcm )
 target_link_libraries( kicad-cli pcm )
+
+if( MSVC )
+    # kicommon exports nlohmann's inline basic_json members: KICOMMON_API classes such
+    # as PARAM_LAYER_PRESET derive from PARAM_LAMBDA<nlohmann::json>, and exporting a
+    # class drags its template base into the export table.  The codex sources use
+    # nlohmann directly and emit their own copies, so the link sees each function both
+    # imported and defined locally (LNK2005 -> LNK1169).  Both copies come from the same
+    # header compiled with the same flags, so letting the linker keep one is safe.
+    # Verified still required: removing this reproduces 45 LNK2005 errors.
+    # Removing it for real means un-exporting those parameter classes from kicommon.
+    target_link_options( kicad PRIVATE /FORCE:MULTIPLE )
+endif()
 
 install( TARGETS kicad
     DESTINATION ${KICAD_BIN}
