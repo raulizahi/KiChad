@@ -119,15 +119,61 @@ Notes on the sample:
   the native Codex PCB tools are built on it.
 - `vcpkg.json` pins protobuf to 3.21.12, the same generation Ubuntu 24.04 ships, so the
   `kichad_protobuf_compat.h` shims that macOS needs for protobuf 33 should not be required here.
-- Developer builds expect a `codex.exe` on `PATH`.  `tools/fetch-codex-standalone.sh` pins the
-  `x86_64-unknown-linux-musl` package and checks for Linux-only payload (`bwrap`, bundled `zsh`),
-  so it does not serve Windows; there is no Windows packaging path yet.
-- Live PCB tools are not expected to work yet.  `KICHAD_IPC_CLIENT` discovers an open editor by
-  scanning the temp directory for `api*.sock` files, but nng's `ipc://` transport uses named pipes
-  on Windows and creates no such files.  This is unverified and needs a named-pipe discovery path;
-  until then the s-expression schematic and library tools are the usable surface.
+- Developer builds expect a `codex.exe` on `PATH`.  Codex ships an official Windows CLI, so
+  `winget install OpenAI.Codex` supplies one; the release artifact is
+  `codex-x86_64-pc-windows-msvc.exe`.  Note that winget installs it under that target-triple name
+  rather than as `codex.exe`, so create a hard link beside it:
+
+  ```powershell
+  $d = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\OpenAI.Codex_Microsoft.Winget.Source_8wekyb3d8bbwe"
+  New-Item -ItemType HardLink -Path "$d\codex.exe" -Target "$d\codex-x86_64-pc-windows-msvc.exe"
+  ```
+
+  Start KiChad from a shell that has picked up the updated `PATH`; a shell opened before the
+  install still has the old one and the app reports that it cannot find `codex.exe`.
+
+  Packaging is a separate matter: `tools/fetch-codex-standalone.sh` hardcodes
+  `x86_64-unknown-linux-musl` and asserts Linux-only payload (`bwrap`, bundled `zsh`), so it does
+  not serve Windows.  The CLI above covers developer builds; a self-contained Windows installer
+  would need that script taught about `x86_64-pc-windows-msvc` and a platform-specific payload
+  check.
+- Live PCB tools work.  `KICHAD_IPC_CLIENT` discovers an open editor by enumerating the named pipe
+  namespace on Windows, because nng's `ipc://` transport is a named pipe there whose name is the
+  socket path and which creates nothing on disk -- the Unix socket file scan used on Linux and
+  macOS always came up empty.
 - Everything under `tools/` is bash; there are no PowerShell equivalents, so the smoke and library
   check scripts need Git Bash or MSYS2, and some will not work regardless.
+
+### Running the Windows install tree
+
+`cmake --install` does not stage the vcpkg runtime assets, so the installed tree does not start
+until two sets of files are copied in by hand.  Both are known gaps rather than build failures;
+until the install rules deploy them, repeat these after every `cmake --install`.
+
+```powershell
+$build   = "build/release-windows"
+$install = "build/install-windows"
+
+# 1. Runtime DLLs.  install stages ~65 of them and no wxWidgets at all, so kicad.exe and
+#    kicad-cli.exe fail immediately with 0xC0000135 (STATUS_DLL_NOT_FOUND).
+Copy-Item "$build/vcpkg_installed/x64-windows/bin/*.dll" "$install/bin" -Force
+
+# 2. Python standard library.  KiCad embeds Python and calls
+#    Py_SetPythonHome( Pgm().GetExecutablePath() ), which resolves to <install>/bin, so CPython
+#    looks for its stdlib in <install>/bin/Lib.  Without it startup dies with
+#    "failed to get the Python codec of the filesystem encoding".  Note this is *not* the
+#    <root>/lib/python3 layout the comment in scripting/python_scripting.cpp describes.
+Copy-Item "$build/vcpkg_installed/x64-windows/tools/python3/Lib"  "$install/bin" -Recurse -Force
+Copy-Item "$build/vcpkg_installed/x64-windows/tools/python3/DLLs" "$install/bin" -Recurse -Force
+```
+
+The durable fix is `install(RUNTIME_DEPENDENCY_SET)` for the DLLs plus an install rule for the
+Python tree; neither is in place yet.
+
+Symbol, footprint, and 3D-model libraries are also absent: they live in the separate
+`kicad-symbols`, `kicad-footprints`, and `kicad-packages3D` repositories that this source tree
+does not build, so a from-source install has empty global library tables.  Designs that resolve
+`Device:R` and friends need those provisioned, or project-local libraries instead.
 
 ## Useful checks
 
