@@ -1,0 +1,63 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "kichad-windows",
+      "displayName": "KiChad Windows development build",
+      "description": "RelWithDebInfo build with QA tests, vcpkg deps, isolated kichad settings",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release-windows",
+      "installDir": "${sourceDir}/build/install-windows",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "environment": {
+        "VCPKG_ROOT": "C:/vcpkg"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/build/install-windows",
+        "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "KICAD_BUILD_I18N": "OFF",
+        "KICAD_BUILD_QA_TESTS": "ON",
+        "KICAD_CONFIG_DIR": "kichad",
+        "KICAD_IPC_API": "ON",
+        "KICAD_VERSION_EXTRA": "KiChad",
+        "KICAD_SCRIPTING_WXPYTHON": "OFF",
+        "KICAD_UPDATE_CHECK": "OFF",
+        "KICAD_WIN32_DPI_AWARE": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "kichad-windows",
+      "displayName": "Build KiChad (Windows)",
+      "configurePreset": "kichad-windows"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "kichad-windows",
+      "displayName": "Test KiChad (Windows)",
+      "configurePreset": "kichad-windows",
+      "environment": {
+        "KICAD_RUN_FROM_BUILD_DIR": "1"
+      },
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": true
+      }
+    }
+  ]
+}

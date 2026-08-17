@@ -77,6 +77,40 @@ Notes on the sample:
   here).  Running the GUI and the QA suite from the build tree additionally needs bundle
   scaffolding (SharedSupport data, a `Python.framework` link) that no script creates yet.
 
+## Windows development build (experimental)
+
+The qualified platform remains Ubuntu 24.04; Windows is a development convenience only.  As with
+macOS, the tracked `CMakePresets.json` stays Linux-only by policy, so the Windows configuration
+ships as a sample user preset:
+
+```sh
+cp CMakeUserPresets.windows.sample.json CMakeUserPresets.json
+cmake --preset kichad-windows
+cmake --build --preset kichad-windows
+```
+
+Notes on the sample:
+
+- Dependencies come from vcpkg in manifest mode against the tracked `vcpkg.json`.  Edit the
+  preset's `VCPKG_ROOT` to your vcpkg checkout, or drop that `environment` block and export
+  `VCPKG_ROOT` yourself.  The first configure builds the whole dependency set and takes hours.
+- Build from a Visual Studio x64 developer shell so MSVC, the Windows SDK, and `ninja` are on
+  `PATH`.  `/bigobj` is already applied for MSVC by the top-level `CMakeLists.txt`, which the
+  larger `kicad/codex` translation units need.
+- `KICAD_IPC_API` must stay `ON`: `kicad/CMakeLists.txt` fails configuration without it because
+  the native Codex PCB tools are built on it.
+- `vcpkg.json` pins protobuf to 3.21.12, the same generation Ubuntu 24.04 ships, so the
+  `kichad_protobuf_compat.h` shims that macOS needs for protobuf 33 should not be required here.
+- Developer builds expect a `codex.exe` on `PATH`.  `tools/fetch-codex-standalone.sh` pins the
+  `x86_64-unknown-linux-musl` package and checks for Linux-only payload (`bwrap`, bundled `zsh`),
+  so it does not serve Windows; there is no Windows packaging path yet.
+- Live PCB tools are not expected to work yet.  `KICHAD_IPC_CLIENT` discovers an open editor by
+  scanning the temp directory for `api*.sock` files, but nng's `ipc://` transport uses named pipes
+  on Windows and creates no such files.  This is unverified and needs a named-pipe discovery path;
+  until then the s-expression schematic and library tools are the usable surface.
+- Everything under `tools/` is bash; there are no PowerShell equivalents, so the smoke and library
+  check scripts need Git Bash or MSYS2, and some will not work regardless.
+
 ## Useful checks
 
 ```sh
