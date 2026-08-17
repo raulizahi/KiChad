@@ -10,6 +10,7 @@
  */
 
 #include "design_script_symbol_graphics_compiler.h"
+#include "kichad_wide_int.h"
 #include "kichad_from_chars.h"
 
 #include <algorithm>
@@ -281,10 +282,10 @@ bool samePoint( const JSON& aLeft, const JSON& aRight )
 
 bool nonCollinear( const JSON& aStart, const JSON& aMid, const JSON& aEnd )
 {
-    const __int128 ax = aMid["xNm"].get<int64_t>() - aStart["xNm"].get<int64_t>();
-    const __int128 ay = aMid["yNm"].get<int64_t>() - aStart["yNm"].get<int64_t>();
-    const __int128 bx = aEnd["xNm"].get<int64_t>() - aStart["xNm"].get<int64_t>();
-    const __int128 by = aEnd["yNm"].get<int64_t>() - aStart["yNm"].get<int64_t>();
+    const WIDE_INT ax = aMid["xNm"].get<int64_t>() - aStart["xNm"].get<int64_t>();
+    const WIDE_INT ay = aMid["yNm"].get<int64_t>() - aStart["yNm"].get<int64_t>();
+    const WIDE_INT bx = aEnd["xNm"].get<int64_t>() - aStart["xNm"].get<int64_t>();
+    const WIDE_INT by = aEnd["yNm"].get<int64_t>() - aStart["yNm"].get<int64_t>();
     return ax * by != ay * bx;
 }
 

@@ -18,6 +18,8 @@
 #include <string>
 #include <tuple>
 
+#include "kichad_wide_int.h"
+
 
 namespace
 {
@@ -39,19 +41,20 @@ void issue( JSON& aIssues, const std::string& aType, const std::string& aDescrip
 }
 
 
-std::string integerString( __int128 aValue )
+std::string integerString( WIDE_INT aValue )
 {
     if( aValue == 0 )
         return "0";
 
     const bool negative = aValue < 0;
-    unsigned __int128 magnitude = negative ? static_cast<unsigned __int128>( -aValue )
-                                           : static_cast<unsigned __int128>( aValue );
+    WIDE_UINT   magnitude = negative ? static_cast<WIDE_UINT>( -aValue )
+                                     : static_cast<WIDE_UINT>( aValue );
     std::string result;
 
     while( magnitude > 0 )
     {
-        result.push_back( static_cast<char>( '0' + magnitude % 10 ) );
+        const unsigned digit = static_cast<unsigned>( magnitude % 10 );
+        result.push_back( static_cast<char>( '0' + digit ) );
         magnitude /= 10;
     }
 
@@ -63,7 +66,7 @@ std::string integerString( __int128 aValue )
 }
 
 
-JSON boundedInteger( __int128 aValue )
+JSON boundedInteger( WIDE_INT aValue )
 {
     if( aValue >= std::numeric_limits<int64_t>::min()
         && aValue <= std::numeric_limits<int64_t>::max() )
@@ -97,14 +100,14 @@ KICHAD::DESIGN_SCRIPT_ELECTRICAL_ANALYZER::Analyze( const JSON& aCompilerIr )
     for( const JSON& rail : electrical.value( "rails", JSON::array() ) )
     {
         const std::string id = rail.value( "id", "" );
-        __int128 loadNa = 0;
+        WIDE_INT loadNa = 0;
 
         for( const JSON& load : rail.value( "loads", JSON::array() ) )
             loadNa += load.value( "currentNa", int64_t( 0 ) );
 
         const int64_t reserve = rail.value( "reservePpm", int64_t( 0 ) );
-        const __int128 requiredNa =
-                ( loadNa * static_cast<__int128>( ONE_MILLION + reserve )
+        const WIDE_INT requiredNa =
+                ( loadNa * static_cast<WIDE_INT>( ONE_MILLION + reserve )
                   + ONE_MILLION - 1 )
                 / ONE_MILLION;
         const int64_t availableNa = rail.value( "sourceCurrentNa", int64_t( 0 ) );

@@ -10,6 +10,7 @@
  */
 
 #include "design_script_schematic_planner.h"
+#include "kichad_wide_int.h"
 
 #include "design_script_pcb_planner.h"
 #include "lossless_sexpr_document.h"
@@ -3865,11 +3866,11 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
             candidates.erase( std::unique( candidates.begin(), candidates.end() ),
                               candidates.end() );
             int64_t best = candidates.front();
-            __int128 bestScore = -1;
+            WIDE_INT bestScore = -1;
 
             for( int64_t candidate : candidates )
             {
-                __int128 score = 0;
+                WIDE_INT score = 0;
 
                 for( const PIN_POINT& point : points )
                 {
@@ -3887,7 +3888,7 @@ DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( const JSON& aCompilerIr,
                         opposes = candidate >= point.y;
 
                     if( opposes )
-                        score += static_cast<__int128>( 4'000'000'000LL );
+                        score += static_cast<WIDE_INT>( 4'000'000'000LL );
                 }
 
                 if( bestScore < 0 || score < bestScore || ( score == bestScore && candidate < best ) )
