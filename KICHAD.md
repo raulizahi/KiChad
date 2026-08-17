@@ -94,12 +94,27 @@ Notes on the sample:
 - Dependencies come from vcpkg in manifest mode against the tracked `vcpkg.json`.  Edit the
   preset's `VCPKG_ROOT` to your vcpkg checkout, or drop that `environment` block and export
   `VCPKG_ROOT` yourself.  The first configure builds the whole dependency set and takes hours.
-  `VCPKG_INSTALL_OPTIONS` passes `--clean-buildtrees-after-build` so each port's intermediates are
-  dropped once it installs, holding peak disk near `installed/` plus one in-flight port; drop it if
-  you would rather keep the trees for faster single-port rebuilds.
+  `VCPKG_INSTALL_OPTIONS` passes `--clean-buildtrees-after-build` and `--clean-packages-after-build`
+  so each port's intermediates and staging tree are dropped once it installs, holding peak disk near
+  `vcpkg_installed/` plus one in-flight port; drop them if you would rather keep the trees for faster
+  single-port rebuilds.
+- `VCPKG_OVERLAY_TRIPLETS` points at `tools/kichad_vcpkg_triplets`, whose `x64-windows` triplet
+  inherits the stock one and adds `VCPKG_BUILD_TYPE release`.  The preset builds KiChad itself as
+  `RelWithDebInfo`, which links the release CRT and never touches the debug dependency set, so
+  skipping it roughly halves both dependency build time and installed size.  A triplet is the only
+  way to set this in manifest mode: the vcpkg toolchain forwards `VCPKG_OVERLAY_TRIPLETS` but
+  ignores a `-DVCPKG_BUILD_TYPE=` on the CMake command line.  Delete the `set()` in that triplet if
+  you need to debug into a dependency.  This is separate from the upstream
+  `tools/custom_vcpkg_triplets` that `.gitlab/Windows-CI.yml` uses, which is left untouched.
 - Build from a Visual Studio x64 developer shell so MSVC, the Windows SDK, and `ninja` are on
   `PATH`.  `/bigobj` is already applied for MSVC by the top-level `CMakeLists.txt`, which the
   larger `kicad/codex` translation units need.
+- SWIG 4.0 or newer must be installed separately; `winget install SWIG.SWIG` puts it on `PATH`.
+  `CMakeLists.txt` calls `find_package( SWIG 4.0 REQUIRED )` unconditionally, so configure fails
+  with `Could NOT find SWIG` even though the preset sets `KICAD_SCRIPTING_WXPYTHON=OFF`.  vcpkg
+  cannot supply it: there is no `swig` port, and `vcpkg.json` does not list one.  If your SWIG is
+  not on `PATH`, point the preset at it instead by adding
+  `"SWIG_EXECUTABLE": "<swigwin>/swig.exe"` and `"SWIG_DIR": "<swigwin>/Lib"` to `cacheVariables`.
 - `KICAD_IPC_API` must stay `ON`: `kicad/CMakeLists.txt` fails configuration without it because
   the native Codex PCB tools are built on it.
 - `vcpkg.json` pins protobuf to 3.21.12, the same generation Ubuntu 24.04 ships, so the
