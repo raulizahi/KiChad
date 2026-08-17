@@ -12,9 +12,21 @@
 #include "kicad_ipc_client.h"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <thread>
 #include <vector>
+
+#ifdef _WIN32
+// NOMINMAX keeps windows.h from replacing std::min below with its own macro.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 #include <api/common/commands/editor_commands.pb.h>
 #include <kinng.h>
@@ -49,6 +61,95 @@ std::string pathUtf8( const std::filesystem::path& aPath )
 {
     const std::u8string utf8 = aPath.generic_u8string();
     return std::string( reinterpret_cast<const char*>( utf8.data() ), utf8.size() );
+}
+
+
+std::string loweredPath( std::string aValue )
+{
+    std::transform( aValue.begin(), aValue.end(), aValue.begin(),
+                    []( unsigned char aCharacter )
+                    {
+                        return static_cast<char>( std::tolower( aCharacter ) );
+                    } );
+    return aValue;
+}
+
+
+/**
+ * Collect the endpoints that look like an open KiCad editor socket.
+ *
+ * nng's ipc:// transport is a Unix domain socket on Linux and macOS, so every open editor
+ * leaves an api*.sock file behind and enumerating the socket directory finds them.  On
+ * Windows the same transport is a named pipe whose name is the socket path string, and
+ * nothing is created on disk: the directory is always empty, so a filesystem scan reports
+ * that no editor is open no matter how many are running.  Enumerate the pipe namespace
+ * there instead and match the same api*.sock naming, so both platforms discover the same
+ * endpoints and the caller's ipc:// URLs stay identical.
+ */
+bool collectSocketCandidates( const wxString& aSocketDirectory,
+                              std::vector<std::filesystem::path>& aPaths, std::string& aError )
+{
+    constexpr size_t MAX_CANDIDATES = 32;
+
+    auto isEditorSocket = []( const std::filesystem::path& aCandidate )
+    {
+        const std::string name = pathUtf8( aCandidate.filename() );
+        return name.starts_with( "api" ) && name.ends_with( ".sock" );
+    };
+
+#ifdef _WIN32
+    WIN32_FIND_DATAW findData;
+    HANDLE           find = FindFirstFileW( L"\\\\.\\pipe\\*", &findData );
+
+    if( find == INVALID_HANDLE_VALUE )
+    {
+        aError = "the Windows named pipe namespace is unavailable";
+        return false;
+    }
+
+    // Pipe names carry the whole socket path, so match the directory by name.  Windows
+    // paths are case-insensitive, and pathUtf8() normalizes the separators for both sides.
+    const std::string wanted = loweredPath( pathUtf8( normalizedPath( aSocketDirectory ) ) );
+
+    do
+    {
+        const std::filesystem::path candidate( findData.cFileName );
+
+        if( !isEditorSocket( candidate ) )
+            continue;
+
+        if( loweredPath( pathUtf8( candidate.parent_path() ) ) != wanted )
+            continue;
+
+        aPaths.emplace_back( candidate );
+    } while( aPaths.size() < MAX_CANDIDATES && FindNextFileW( find, &findData ) );
+
+    FindClose( find );
+    return true;
+#else
+    std::error_code                     directoryError;
+    std::filesystem::directory_iterator directory( std::filesystem::path( utf8Path( aSocketDirectory ) ),
+                                                   directoryError );
+
+    if( directoryError )
+    {
+        aError = "the KiCad IPC socket directory is unavailable";
+        return false;
+    }
+
+    for( const std::filesystem::directory_entry& entry : directory )
+    {
+        if( !isEditorSocket( entry.path() ) )
+            continue;
+
+        aPaths.emplace_back( entry.path() );
+
+        if( aPaths.size() == MAX_CANDIDATES )
+            break;
+    }
+
+    return true;
+#endif
 }
 
 
@@ -111,36 +212,16 @@ wxString KICHAD_IPC_CLIENT::DefaultSocketDirectory()
 bool KICHAD_IPC_CLIENT::FindOpenPcb( const wxString& aProjectPath, const wxString& aBoardPath,
                                      KICHAD_IPC_TARGET& aTarget, std::string& aError ) const
 {
-    std::filesystem::path socketDirectory( utf8Path( m_socketDirectory ) );
-    wxString              boardName = wxFileName( aBoardPath ).GetFullName();
-    auto                  deadline = std::chrono::steady_clock::now() + m_timeout;
+    wxString boardName = wxFileName( aBoardPath ).GetFullName();
+    auto     deadline = std::chrono::steady_clock::now() + m_timeout;
 
     do
     {
-        std::error_code directoryError;
-        std::filesystem::directory_iterator directory( socketDirectory, directoryError );
-
-        if( directoryError )
-        {
-            aError = "the KiCad IPC socket directory is unavailable";
-            return false;
-        }
-
         std::vector<std::filesystem::path> socketPaths;
         socketPaths.reserve( 32 );
 
-        for( const std::filesystem::directory_entry& entry : directory )
-        {
-            std::string name = pathUtf8( entry.path().filename() );
-
-            if( name.starts_with( "api" ) && name.ends_with( ".sock" ) )
-            {
-                socketPaths.emplace_back( entry.path() );
-
-                if( socketPaths.size() == 32 )
-                    break;
-            }
-        }
+        if( !collectSocketCandidates( m_socketDirectory, socketPaths, aError ) )
+            return false;
 
         std::sort( socketPaths.begin(), socketPaths.end() );
 
