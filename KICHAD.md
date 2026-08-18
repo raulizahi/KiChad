@@ -234,7 +234,10 @@ schematic-derived ratsnest.  The agent then drives the `layout` dynamic tool:
   not log text.
 - `adopt` backs up the staged board to the project's `.kichad/pre-layout/` directory and copies
   the routed board into the project for review; `revert` restores the backup if the result is
-  rejected.
+  rejected.  Adopt runs immediately once `run` returns rather than pausing for confirmation:
+  the pre-layout backup and `revert` are what make the result reversible, so the decision does
+  not need a gate of its own.  The gates that follow — render, inspect, DRC — still decide
+  whether the routed board is kept.
 - `reconcile` back-annotates an accepted routed board into the KDS — outline, placements, and
   every track and via become authored statements — validated by a compile with automatic
   restore on failure.  After reconcile, `design.apply` reproduces the routed board instead of
