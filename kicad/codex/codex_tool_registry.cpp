@@ -328,6 +328,20 @@ wxString CODEX_TOOL_REGISTRY::ExternalLayoutTool() const
 }
 
 
+void CODEX_TOOL_REGISTRY::SetExternalLayoutEnabled( bool aEnabled )
+{
+    std::lock_guard<std::mutex> lock( m_externalLayoutToolMutex );
+    m_externalLayoutEnabled = aEnabled;
+}
+
+
+bool CODEX_TOOL_REGISTRY::ExternalLayoutEnabled() const
+{
+    std::lock_guard<std::mutex> lock( m_externalLayoutToolMutex );
+    return m_externalLayoutEnabled;
+}
+
+
 void CODEX_TOOL_REGISTRY::SetExternalLayoutLayers( int aLayers )
 {
     std::lock_guard<std::mutex> lock( m_externalLayoutToolMutex );
@@ -344,13 +358,21 @@ int CODEX_TOOL_REGISTRY::ExternalLayoutLayers() const
 
 CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::Specs() const
 {
-    return JSON::array( { KICHAD::CODEX_TOOLS::ProjectSpec(),
-                          KICHAD::CODEX_TOOLS::InspectSpec(),
-                          KICHAD::CODEX_TOOLS::DesignSpec(),
-                          KICHAD::CODEX_TOOLS::PcbSpec(),
-                          KICHAD::CODEX_TOOLS::VerifySpec(),
-                          KICHAD::CODEX_TOOLS::FabricateSpec(),
-                          KICHAD::CODEX_TOOLS::LayoutSpec() } );
+    JSON specs = JSON::array( { KICHAD::CODEX_TOOLS::ProjectSpec(),
+                                KICHAD::CODEX_TOOLS::InspectSpec(),
+                                KICHAD::CODEX_TOOLS::DesignSpec(),
+                                KICHAD::CODEX_TOOLS::PcbSpec(),
+                                KICHAD::CODEX_TOOLS::VerifySpec(),
+                                KICHAD::CODEX_TOOLS::FabricateSpec() } );
+
+    // Advertising the layout tool while the user has external layout disabled invites
+    // the agent to treat the switched-off tool as a blocker instead of routing in the
+    // KDS itself.  Threads bind tools at start, so a preference flip takes effect on
+    // the next new conversation.
+    if( ExternalLayoutEnabled() )
+        specs.push_back( KICHAD::CODEX_TOOLS::LayoutSpec() );
+
+    return specs;
 }
 
 

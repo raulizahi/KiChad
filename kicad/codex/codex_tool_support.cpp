@@ -2021,6 +2021,71 @@ bool runNativeKiCadFabrication( const wxFileName& aBoard,
 }
 
 
+// Every fitted physical component must carry a datasheet conformance record: the agent
+// verifies pinout and application-circuit support against the exact part's datasheet
+// and records it.  Both production fabrication and the external place-and-route handoff
+// are blocked without that evidence.
+JSON datasheetConformanceIssues( const JSON& aIr )
+{
+    JSON issues = JSON::array();
+    std::map<std::string, const JSON*> conformanceRecords;
+
+    if( aIr.contains( "conformance" ) && aIr["conformance"].is_array() )
+    {
+        for( const JSON& record : aIr["conformance"] )
+            conformanceRecords[record.value( "component", "" )] = &record;
+    }
+
+    if( !aIr.contains( "schematic" ) || !aIr["schematic"].contains( "components" ) )
+        return issues;
+
+    for( const JSON& component : aIr.at( "schematic" ).at( "components" ) )
+    {
+        const std::string reference = component.value( "reference", "" );
+
+        if( reference.empty() || component.value( "dnp", false )
+            || !component.contains( "footprint" ) || component["footprint"].is_null() )
+        {
+            continue;
+        }
+
+        const auto record = conformanceRecords.find( reference );
+
+        if( record == conformanceRecords.end() )
+        {
+            issues.push_back(
+                    { { "type", "missing_datasheet_conformance" },
+                      { "severity", "error" },
+                      { "description",
+                        "Fitted component " + reference
+                                + " has no datasheet conformance record; verify its pinout "
+                                  "and application circuit against the exact part's datasheet "
+                                  "and record a (conformance ...) statement" },
+                      { "component", reference } } );
+        }
+        else
+        {
+            for( const JSON& deviation :
+                 record->second->value( "deviations", JSON::array() ) )
+            {
+                if( !deviation.is_string() )
+                    continue;
+
+                issues.push_back(
+                        { { "type", "datasheet_conformance_deviation" },
+                          { "severity", "warning" },
+                          { "description",
+                            "Component " + reference + " deviates from its datasheet: "
+                                    + deviation.get<std::string>() },
+                          { "component", reference } } );
+            }
+        }
+    }
+
+    return issues;
+}
+
+
 JSON buildFabricationPlan( const JSON& aIr, const std::string& aFileStem )
 {
     static constexpr const char* CHECK_ORDER[] = {
@@ -2109,57 +2174,37 @@ JSON buildFabricationPlan( const JSON& aIr, const std::string& aFileStem )
                     "local connections whose generated wires stay clear of symbols." } } );
     }
 
-    // Every fitted physical component must carry a datasheet conformance record: the agent
-    // verifies pinout and application-circuit support against the exact part's datasheet
-    // and records it; production fabrication is blocked without that evidence.
-    std::map<std::string, const JSON*> conformanceRecords;
+    for( const JSON& issue : datasheetConformanceIssues( aIr ) )
+        issues.push_back( issue );
 
-    if( aIr.contains( "conformance" ) && aIr["conformance"].is_array() )
-    {
-        for( const JSON& record : aIr["conformance"] )
-            conformanceRecords[record.value( "component", "" )] = &record;
-    }
-
+    // Surface-mount passives below 0402 imperial (0201, 01005) are forbidden by user
+    // rule: too small for the intended assembly process.  KiCad passive footprints
+    // carry the imperial size as a name token (e.g. R_0201_0603Metric).
     for( const JSON& component : aIr.at( "schematic" ).at( "components" ) )
     {
-        const std::string reference = component.value( "reference", "" );
-
-        if( reference.empty() || component.value( "dnp", false )
-            || !component.contains( "footprint" ) || component["footprint"].is_null() )
+        if( component.value( "dnp", false ) || !component.contains( "footprint" )
+            || !component["footprint"].is_string() )
         {
             continue;
         }
 
-        const auto record = conformanceRecords.find( reference );
+        const std::string footprint = component["footprint"].get<std::string>();
+        const bool undersized = footprint.find( "_01005" ) != std::string::npos
+                                || footprint.find( "_0201_" ) != std::string::npos
+                                || footprint.ends_with( "_0201" );
 
-        if( record == conformanceRecords.end() )
+        if( undersized )
         {
             issues.push_back(
-                    { { "type", "missing_datasheet_conformance" },
+                    { { "type", "undersized_passive" },
                       { "severity", "error" },
                       { "description",
-                        "Fitted component " + reference
-                                + " has no datasheet conformance record; verify its pinout "
-                                  "and application circuit against the exact part's datasheet "
-                                  "and record a (conformance ...) statement" },
-                      { "component", reference } } );
-        }
-        else
-        {
-            for( const JSON& deviation :
-                 record->second->value( "deviations", JSON::array() ) )
-            {
-                if( !deviation.is_string() )
-                    continue;
-
-                issues.push_back(
-                        { { "type", "datasheet_conformance_deviation" },
-                          { "severity", "warning" },
-                          { "description",
-                            "Component " + reference + " deviates from its datasheet: "
-                                    + deviation.get<std::string>() },
-                          { "component", reference } } );
-            }
+                        "Component " + component.value( "reference", std::string( "?" ) )
+                                + " uses footprint " + footprint
+                                + "; surface-mount passives smaller than 0402 imperial "
+                                  "(0201, 01005) are not allowed - choose an 0402 or "
+                                  "larger package" },
+                      { "component", component.value( "reference", std::string( "?" ) ) } } );
         }
     }
 
@@ -7014,6 +7059,12 @@ nlohmann::json KICHAD::CODEX_TOOLS::BuildFabricationPlan(
         const nlohmann::json& aIr, const std::string& aFileStem )
 {
     return buildFabricationPlan( aIr, aFileStem );
+}
+
+
+nlohmann::json KICHAD::CODEX_TOOLS::DatasheetConformanceIssues( const nlohmann::json& aIr )
+{
+    return datasheetConformanceIssues( aIr );
 }
 
 

@@ -273,6 +273,14 @@ BOOST_AUTO_TEST_CASE( AdvertisesOnlyImplementedNativeTools )
     BOOST_REQUIRE_EQUAL( fabricationOperations.size(), 2 );
     BOOST_CHECK_EQUAL( fabricationOperations[0].get<std::string>(), "plan" );
     BOOST_CHECK_EQUAL( fabricationOperations[1].get<std::string>(), "export" );
+
+    // The layout tool is advertised only when the user enables external layout, so a
+    // disabled install never invites the agent to treat the switched-off tool as a
+    // blocker.
+    registry.SetExternalLayoutEnabled( true );
+    JSON withLayout = registry.Specs();
+    BOOST_REQUIRE_EQUAL( withLayout.size(), 7 );
+    BOOST_CHECK_EQUAL( withLayout[6]["name"].get<std::string>(), "layout" );
 }
 
 
@@ -694,6 +702,61 @@ BOOST_AUTO_TEST_CASE( VerifiesCanonicalPhysicalLayoutContract )
     BOOST_CHECK_EQUAL( failedData["counts"]["errors"].get<int>(), 1 );
     BOOST_CHECK_EQUAL( failedData["violations"][0]["type"].get<std::string>(),
                        "board_width_exceeded" );
+}
+
+
+BOOST_AUTO_TEST_CASE( BlocksExternalPlaceAndRouteWithoutDatasheetConformance )
+{
+    TOOL_PROJECT_FIXTURE fixture;
+    BOOST_REQUIRE( wxSetEnv( wxS( "KICHAD_EXTERNAL_PNR" ), wxS( "/usr/bin/true" ) ) );
+
+    const auto writeKds = [&]( bool aWithConformance )
+    {
+        std::string source =
+                "(kichad_design\n"
+                "  (version 1)\n"
+                "  (project pnr_gate)\n"
+                "  (component R1 (symbol \"Device:R\") (value \"1k\") "
+                "(footprint \"Resistor:R_0603\"))\n";
+
+        if( aWithConformance )
+        {
+            source += "  (conformance R1 (datasheet \"https://example.com/r1.pdf\") "
+                      "(verified_on 2026-08-05) (pins verified) (application verified))\n";
+        }
+
+        source += ")\n";
+        wxFFile file( wxFileName( fixture.Root(), wxS( "design.kicad_kds" ) ).GetFullPath(),
+                      wxS( "wb" ) );
+        BOOST_REQUIRE( file.IsOpened() );
+        BOOST_REQUIRE_EQUAL( file.Write( source.data(), source.size() ), source.size() );
+    };
+
+    CODEX_TOOL_REGISTRY registry( [&fixture]() { return fixture.Root(); } );
+
+    writeKds( false );
+
+    // With the External Layout preference off, run refuses even with a configured tool.
+    JSON disabled = registry.Handle( "layout", { { "operation", "run" } } );
+    BOOST_REQUIRE_MESSAGE( !disabled.at( "success" ).get<bool>(), disabled.dump() );
+    BOOST_CHECK_EQUAL( envelope( disabled )["error"]["code"].get<std::string>(),
+                       "mode_disabled" );
+
+    registry.SetExternalLayoutEnabled( true );
+    JSON blocked = registry.Handle( "layout", { { "operation", "run" } } );
+    BOOST_REQUIRE_MESSAGE( !blocked.at( "success" ).get<bool>(), blocked.dump() );
+    BOOST_CHECK_EQUAL( envelope( blocked )["error"]["code"].get<std::string>(),
+                       "missing_datasheet_conformance" );
+
+    writeKds( true );
+    JSON allowed = registry.Handle( "layout", { { "operation", "run" } } );
+    BOOST_REQUIRE_MESSAGE( !allowed.at( "success" ).get<bool>(), allowed.dump() );
+    // The dummy external tool exits successfully without creating an output directory:
+    // reaching output validation proves the datasheet gate let the verified design through.
+    BOOST_CHECK_EQUAL( envelope( allowed )["error"]["code"].get<std::string>(),
+                       "invalid_output" );
+
+    wxUnsetEnv( wxS( "KICHAD_EXTERNAL_PNR" ) );
 }
 
 

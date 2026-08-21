@@ -99,6 +99,15 @@ desired copper layer count.  Settings live in `kicad.json` (`codex.external_layo
 invoked as `<tool> --input-dir <project> --output-dir <sibling> --layers N`; a project directory
 named `Foo-no-layout` outputs to sibling `Foo`, anything else to `Foo-routed`.
 
+`layout.run` refuses to invoke the external tool unless the Preferences checkbox is enabled —
+the configured executable path (or `KICHAD_EXTERNAL_PNR`) alone is not an opt-in, and a
+disabled mode fails the run with `mode_disabled`.  It further refuses until the project's KDS
+compiles and every
+fitted component carries a `(conformance …)` datasheet record — the same evidence production
+fabrication requires — so the architecture is verified against every part's datasheet before
+any placement or routing happens.  A missing record fails the run with
+`missing_datasheet_conformance` naming each unverified component.
+
 With the mode enabled, new Codex conversations stage a handoff instead of placing and routing:
 the outline is sized so every component fits without abutting, only connectors and mechanically
 constrained parts are placed, and everything else sits outside the outline connected by the

@@ -76,6 +76,8 @@ public:
     wxString ExternalLayoutTool() const;
     void SetExternalLayoutLayers( int aLayers );
     int ExternalLayoutLayers() const;
+    void SetExternalLayoutEnabled( bool aEnabled );
+    bool ExternalLayoutEnabled() const;
 
     static bool RequiresFinalConfirmation( const std::string& aTool,
                                            const JSON& aArguments );
@@ -107,6 +109,7 @@ private:
     mutable std::mutex m_externalLayoutToolMutex;
     wxString           m_externalLayoutTool;
     int                m_externalLayoutLayers = 2;
+    bool               m_externalLayoutEnabled = false;
     JSON handleElectricalVerify( const JSON& aArguments,
                                  const wxString& aProjectPath ) const;
     JSON handleLayoutVerify( const JSON& aArguments, const wxString& aProjectPath ) const;

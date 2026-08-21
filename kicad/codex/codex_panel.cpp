@@ -1084,6 +1084,7 @@ void CODEX_PANEL::RefreshExternalLayoutSettings()
     }
 
     m_externalLayoutMode = mode;
+    m_toolRegistry.SetExternalLayoutEnabled( mode );
     m_toolRegistry.SetExternalLayoutTool( tool );
     m_toolRegistry.SetExternalLayoutLayers( layers );
 }

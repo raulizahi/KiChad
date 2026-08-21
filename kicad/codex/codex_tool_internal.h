@@ -165,6 +165,7 @@ bool CreateFabricationVerificationSnapshot(
         PRIVATE_TEMPORARY_DIRECTORY& aSnapshot, std::string& aError );
 nlohmann::json BuildFabricationPlan( const nlohmann::json& aIr,
                                      const std::string& aFileStem );
+nlohmann::json DatasheetConformanceIssues( const nlohmann::json& aIr );
 bool RunNativeKiCadFabrication( const wxFileName& aBoard,
                                 const wxFileName& aSchematic,
                                 const nlohmann::json& aPlan,

@@ -11,6 +11,7 @@
 
 #include "codex_tool_registry.h"
 #include "codex_tool_internal.h"
+#include "design_script_compiler.h"
 #include "lossless_sexpr_document.h"
 
 #include <chrono>
@@ -501,7 +502,11 @@ nlohmann::json LayoutSpec()
                "sized to hold all components, connectors fixed, all other footprints outside "
                "the outline, no tracks) and writes a fully placed and routed copy of the "
                "project into a sibling output directory. Operation status reports whether the "
-               "tool is configured; run executes it and reports the output location. The "
+               "tool is configured; run executes it and reports the output location. Run "
+               "refuses to start until the project's KDS compiles and every fitted component "
+               "carries a (conformance ...) datasheet record: verify the architecture and "
+               "each part's pinout and application circuit against its datasheet BEFORE "
+               "requesting place and route. The "
                "input project is never modified by run. Operation adopt first saves the "
                "current staged board to the project's .kichad/pre-layout/ directory, then "
                "copies the routed board from the output directory into the active project; "
@@ -582,15 +587,23 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
 
     wxFileName tool;
     std::string toolError;
+    const bool enabled = ExternalLayoutEnabled();
     const bool configured = resolveExternalTool( ExternalLayoutTool(), tool, toolError );
 
     if( operation == "status" )
     {
-        JSON payload = { { "configured", configured },
+        JSON payload = { { "enabled", enabled },
+                         { "configured", configured },
                          { "inputDirectory", projectDirectory.GetFullPath().ToUTF8().data() },
                          { "outputDirectory", outputDirectory.GetFullPath().ToUTF8().data() } };
 
-        if( configured )
+        if( !enabled )
+        {
+            payload["reason"] = "external layout is disabled by user preference; author "
+                                "placement and routing directly in the KDS instead of "
+                                "asking the user to enable it";
+        }
+        else if( configured )
             payload["tool"] = tool.GetFullPath().ToUTF8().data();
         else
             payload["reason"] = toolError;
@@ -1026,8 +1039,86 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
                           { "kdsBackup", kdsBackup.GetFullPath().ToUTF8().data() } } );
     }
 
+    if( !enabled )
+    {
+        return failure( "mode_disabled",
+                        "external layout is disabled by user preference; this is not a "
+                        "blocker: author placement and routing yourself as (place ...), "
+                        "(route ...), and (via ...) statements in the KDS. Do not ask the "
+                        "user to enable external layout" );
+    }
+
     if( !configured )
         return failure( "tool_unconfigured", toolError );
+
+    // Place and route must not start until the architecture has been verified against
+    // every fitted component's datasheet: compile the authored KDS and require a
+    // (conformance ...) record per component, exactly as production fabrication does.
+    {
+        wxDir kdsDir( projectDirectory.GetFullPath() );
+        wxString kdsFile;
+
+        if( !kdsDir.IsOpened()
+            || !kdsDir.GetFirst( &kdsFile, wxS( "*.kicad_kds" ), wxDIR_FILES ) )
+        {
+            return failure( "missing_source",
+                            "the project has no .kicad_kds design; the KDS is the authored "
+                            "source of truth required before external place and route" );
+        }
+
+        wxString extraKds;
+
+        if( kdsDir.GetNext( &extraKds ) )
+        {
+            return failure( "invalid_source",
+                            "the project contains more than one .kicad_kds; run cannot "
+                            "determine which design to verify" );
+        }
+
+        wxFile kds( wxFileName( projectDirectory.GetFullPath(), kdsFile ).GetFullPath(),
+                    wxFile::read );
+        const wxFileOffset length = kds.IsOpened() ? kds.Length() : -1;
+
+        if( length < 0 || length > 64 * 1024 * 1024 )
+            return failure( "read_failed", "could not read the KDS design file" );
+
+        std::string kdsText( static_cast<size_t>( length ), '\0' );
+
+        if( kds.Read( kdsText.data(), kdsText.size() )
+            != static_cast<ssize_t>( kdsText.size() ) )
+        {
+            return failure( "read_failed", "could not read the KDS design file" );
+        }
+
+        const KICHAD::DESIGN_SCRIPT_COMPILER::RESULT compiled =
+                KICHAD::DESIGN_SCRIPT_COMPILER::Compile( kdsText );
+
+        if( !compiled.ok )
+        {
+            return failure( "compile_failed",
+                            "the KDS design does not compile; fix it before external "
+                            "place and route",
+                            { { "diagnostics", compiled.diagnostics } } );
+        }
+
+        JSON blockers = JSON::array();
+
+        for( const JSON& issue : KICHAD::CODEX_TOOLS::DatasheetConformanceIssues( compiled.ir ) )
+        {
+            if( issue.value( "severity", "" ) == "error" )
+                blockers.push_back( issue );
+        }
+
+        if( !blockers.empty() )
+        {
+            return failure(
+                    "missing_datasheet_conformance",
+                    "external place and route is blocked until every fitted component's "
+                    "architecture and application circuit have been verified against its "
+                    "datasheet and recorded as a (conformance ...) statement",
+                    { { "issues", blockers } } );
+        }
+    }
 
     if( outputDirectory.DirExists() )
     {
