@@ -19,6 +19,7 @@
 #include <algorithm>
 
 #include <wx/button.h>
+#include <wx/checkbox.h>
 #include <wx/choice.h>
 #include <wx/datetime.h>
 #include <wx/ffile.h>
@@ -189,6 +190,8 @@ CODEX_PANEL::CODEX_PANEL( wxWindow* aParent, std::function<wxString()> aProjectP
         m_input( nullptr ),
         m_sendButton( nullptr ),
         m_stopButton( nullptr ),
+        m_autoContinueCheckbox( nullptr ),
+        m_autoContinueRemaining( 0 ),
         m_revertButton( nullptr ),
         m_newConversationButton( nullptr ),
         m_externalLayoutMode( false ),
@@ -275,8 +278,14 @@ CODEX_PANEL::CODEX_PANEL( wxWindow* aParent, std::function<wxString()> aProjectP
     wxBoxSizer* actionRow = new wxBoxSizer( wxHORIZONTAL );
     m_stopButton = new wxButton( this, wxID_ANY, _( "Stop" ) );
     m_sendButton = new wxButton( this, wxID_ANY, _( "Send" ) );
+    m_autoContinueCheckbox = new wxCheckBox( this, wxID_ANY, _( "Auto-continue" ) );
+    m_autoContinueCheckbox->SetToolTip( _( "When a turn completes without asking a question or "
+                                           "requesting approval, automatically send \"Continue.\" "
+                                           "(up to 25 times per message you send). Stop ends the "
+                                           "chain." ) );
     m_stopButton->Disable();
     m_sendButton->Disable();
+    actionRow->Add( m_autoContinueCheckbox, 0, wxALIGN_CENTER_VERTICAL );
     actionRow->AddStretchSpacer();
     actionRow->Add( m_stopButton, 0, wxRIGHT, FromDIP( 6 ) );
     actionRow->Add( m_sendButton );
@@ -1498,6 +1507,8 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
             setStatus( wxString::Format( _( "Codex turn failed: %s" ), error ) );
         }
 
+        const wxString finalAgentText = wxString::FromUTF8( m_currentAgentMessage );
+
         if( !m_currentAgentMessage.empty() )
         {
             m_conversationHistory.push_back( { "assistant", m_currentAgentMessage } );
@@ -1510,6 +1521,9 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
         m_agentResponseOpen = false;
         m_turnId.clear();
         setBusy( false );
+
+        if( status == "completed" )
+            maybeAutoContinue( finalAgentText );
     }
     else if( method == "error" )
     {
@@ -1982,6 +1996,11 @@ void CODEX_PANEL::onSend( wxCommandEvent& aEvent )
         return;
 
     m_input->Clear();
+
+    // Each user-authored message refills the auto-continue budget; automatic
+    // continuations spend it without refilling.
+    m_autoContinueRemaining = 25;
+
     submitUserMessage( message );
 }
 
@@ -2026,8 +2045,66 @@ bool CODEX_PANEL::submitUserMessage( const wxString& aMessage )
 }
 
 
+void CODEX_PANEL::maybeAutoContinue( const wxString& aAgentText )
+{
+    if( !m_autoContinueCheckbox || !m_autoContinueCheckbox->IsChecked() )
+        return;
+
+    if( m_autoContinueRemaining <= 0 )
+        return;
+
+    // The agent is told to state its stopping reason.  Hand control back to the user when
+    // the response asks a question, requests approval, or declares the scope complete;
+    // otherwise the stop was a routine checkpoint and the work should keep flowing.
+    const wxString tail = aAgentText.Right( 800 ).Lower();
+
+    bool asksQuestion = false;
+
+    for( size_t pos = tail.find( '?' ); pos != wxString::npos; pos = tail.find( '?', pos + 1 ) )
+    {
+        if( pos + 1 >= tail.size() || tail[pos + 1] == ' ' || tail[pos + 1] == '\n'
+            || tail[pos + 1] == ')' )
+        {
+            asksQuestion = true;
+            break;
+        }
+    }
+
+    // Terse responses signal a stall, not a work turn: a genuine progress pass always
+    // produces a substantial report.  Continuing against a stall just burns turns.
+    const bool stalled = aAgentText.size() < 200 || tail.Contains( wxS( "blocked" ) )
+                         || tail.Contains( wxS( "cannot continue" ) )
+                         || tail.Contains( wxS( "cannot safely" ) )
+                         || tail.Contains( wxS( "unable to continue" ) )
+                         || tail.Contains( wxS( "waiting for" ) );
+
+    if( asksQuestion || stalled || tail.Contains( wxS( "approval" ) )
+        || tail.Contains( wxS( "approve" ) )
+        || tail.Contains( wxS( "scope is complete" ) )
+        || tail.Contains( wxS( "requested scope" ) ) )
+    {
+        appendTranscript( _( "\n[Auto-continue paused: Codex needs your input.]\n" ) );
+        return;
+    }
+
+    --m_autoContinueRemaining;
+    appendTranscript( wxString::Format( _( "\n[Auto-continuing (%d remaining)...]\n" ),
+                                        m_autoContinueRemaining ) );
+    CallAfter(
+            [this]()
+            {
+                if( !m_turnId.empty() || m_threadId.empty() )
+                    return;
+
+                submitUserMessage( _( "Continue." ) );
+            } );
+}
+
+
 void CODEX_PANEL::onStop( wxCommandEvent& aEvent )
 {
+    m_autoContinueRemaining = 0;
+
     if( m_threadId.empty() || m_turnId.empty() )
         return;
 
