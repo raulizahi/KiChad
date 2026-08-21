@@ -795,6 +795,17 @@ void PCB_EDIT_FRAME::OnCrossProbeFlashTimer( wxTimerEvent& aEvent )
 
 PCB_EDIT_FRAME::~PCB_EDIT_FRAME()
 {
+#ifdef KICAD_IPC_API
+    // Normally done in doCloseWindow(), but a frame destroyed without the close path
+    // (e.g. programmatic teardown) must not leave a dangling handler registered: a
+    // queued API request dispatched afterwards is a use-after-free.  The common
+    // handler has no doCloseWindow() deregistration at all, so this is its only one.
+    Pgm().GetApiServer().DeregisterHandler( m_apiHandler.get() );
+
+    if( m_apiHandlerCommon )
+        Pgm().GetApiServer().DeregisterHandler( m_apiHandlerCommon.get() );
+#endif
+
     ScriptingOnDestructPcbEditFrame( this );
 
     if( ADVANCED_CFG::GetCfg().m_ShowEventCounters )
