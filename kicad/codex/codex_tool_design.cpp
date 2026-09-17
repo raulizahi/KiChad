@@ -164,6 +164,14 @@ nlohmann::json DesignSpec()
     schema["properties"]["boardPath"] =
             { { "type", "string" }, { "maxLength", 4096 },
               { "description", "Project-relative .kicad_pcb target required by apply." } };
+    schema["properties"]["createBoard"] =
+            { { "type", "boolean" },
+              { "description",
+                "For apply: when boardPath does not exist yet, create it as a new empty KiCad 10 "
+                "board first, e.g. a second board (sensor board beside the compute board) in the "
+                "same project. Name it after the KDS project so <name>.kicad_pcb pairs with the "
+                "KDS root sheet <name>.kicad_sch for DRC parity and fabrication. Boards in one "
+                "project share the project's design rules and netclasses." } };
     schema["properties"]["expectedSha256"] =
             { { "type", "string" }, { "minLength", 64 }, { "maxLength", 64 },
               { "description",
@@ -963,12 +971,62 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
 
         const std::string boardRelativePath = aArguments["boardPath"].get<std::string>();
         wxFileName       board;
+        bool             boardCreated = false;
+
+        if( aArguments.contains( "createBoard" ) && !aArguments["createBoard"].is_boolean() )
+            return failure( "invalid_arguments", "design.createBoard must be a boolean" );
+
+        if( aArguments.value( "createBoard", false ) )
+        {
+            // A second board in the same project: create an empty KiCad 10 board at a
+            // project-confined path so the editor can open it and the apply can populate it.
+            wxFileName  destination;
+            std::string destinationRelative;
+
+            if( !KICHAD::CODEX_TOOLS::ResolveProjectDestination( aProjectPath, boardRelativePath,
+                                                                  "kicad_pcb", destination,
+                                                                  destinationRelative, pathError ) )
+            {
+                return failure( "invalid_path", pathError );
+            }
+
+            if( !destination.FileExists() )
+            {
+                if( !aMutationAvailable )
+                {
+                    return failure( "snapshot_required",
+                                    "creating a board requires the pre-turn project snapshot" );
+                }
+
+                if( !destination.DirExists()
+                    && !wxFileName::Mkdir( destination.GetPath(), 0755, wxPATH_MKDIR_FULL ) )
+                {
+                    return failure( "write_failed", "could not create the board's directory" );
+                }
+
+                const std::string emptyBoard =
+                        "(kicad_pcb\n\t(version 20260206)\n\t(generator \"pcbnew\")\n"
+                        "\t(generator_version \"10.0\")\n\t(general\n\t\t(thickness 1.6)\n"
+                        "\t\t(legacy_teardrops no)\n\t)\n\t(paper \"A4\")\n)\n";
+
+                if( !KICHAD::CODEX_TOOLS::InstallTextFileAtomically( destination, true, emptyBoard,
+                                                                     pathError ) )
+                {
+                    return failure( "write_failed", "could not create the new board: " + pathError );
+                }
+
+                boardCreated = true;
+            }
+        }
 
         if( !KICHAD::CODEX_TOOLS::ResolveProjectFile( aProjectPath, boardRelativePath, board, pathError )
             || board.GetExt() != wxS( "kicad_pcb" ) )
         {
             if( pathError.empty() )
                 pathError = "boardPath must identify a project .kicad_pcb file";
+            else if( pathError == "file does not exist" )
+                pathError = "boardPath does not exist; pass createBoard: true to create a new "
+                            "board there (a second board in the same project is allowed)";
 
             return failure( "invalid_path", pathError );
         }
@@ -2693,6 +2751,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
         JSON payload = { { "operation", "apply" },
                          { "path", sourceRelativePath },
                          { "boardPath", boardRelativePath },
+                         { "boardCreated", boardCreated },
                          { "sourceSha256", compiled.sourceSha256 },
                          { "counts", reconciled.counts },
                          { "managedItems",

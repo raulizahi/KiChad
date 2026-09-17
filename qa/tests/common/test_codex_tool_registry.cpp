@@ -1988,6 +1988,74 @@ BOOST_AUTO_TEST_CASE( CreatesPcbItemsInsideAnIpcTransaction )
 }
 
 
+BOOST_AUTO_TEST_CASE( CreatesASecondBoardOnRequestBeforeApplying )
+{
+    TOOL_PROJECT_FIXTURE fixture;
+    CODEX_TOOL_REGISTRY registry( [&fixture]() { return fixture.Root(); }, []() { return true; },
+                                  [&fixture]() { return fixture.Root(); } );
+    const std::string source = R"KDS((kichad_design
+  (version 1)
+  (project camera_front)
+  (component R1 (symbol "Device:R") (value "1k") (footprint "R:R"))
+  (board
+    (outline
+      (rectangle edge (start 0mm 0mm) (end 20mm 10mm)
+        (radius 0mm) (stroke 0.05mm solid) (layers Edge.Cuts) (fill none)))))
+)KDS";
+    JSON saved = registry.Handle( "design", { { "operation", "save" },
+                                               { "path", "camera_front.kicad_kds" },
+                                               { "source", source } } );
+    BOOST_REQUIRE_MESSAGE( saved.at( "success" ).get<bool>(), saved.dump() );
+    const std::string hash = envelope( saved )["data"]["sourceSha256"].get<std::string>();
+
+    // Without the opt-in, a missing board is refused and the hint names the option.
+    JSON refused = registry.Handle( "design", { { "operation", "apply" },
+                                                 { "path", "camera_front.kicad_kds" },
+                                                 { "boardPath", "camera_front.kicad_pcb" },
+                                                 { "expectedSha256", hash } } );
+    BOOST_CHECK( !refused.at( "success" ).get<bool>() );
+    BOOST_CHECK_EQUAL( envelope( refused )["error"]["code"].get<std::string>(), "invalid_path" );
+    BOOST_CHECK_NE( envelope( refused )["error"]["message"].get<std::string>().find( "createBoard" ),
+                    std::string::npos );
+    BOOST_CHECK( !wxFileName::FileExists( fixture.Root() + wxS( "/camera_front.kicad_pcb" ) ) );
+
+    // Escapes and wrong extensions are refused before anything is written.
+    for( const char* bad : { "../camera_front.kicad_pcb", "camera_front.kicad_sch" } )
+    {
+        JSON escape = registry.Handle( "design", { { "operation", "apply" },
+                                                    { "path", "camera_front.kicad_kds" },
+                                                    { "boardPath", bad },
+                                                    { "createBoard", true },
+                                                    { "expectedSha256", hash } } );
+        BOOST_CHECK( !escape.at( "success" ).get<bool>() );
+        BOOST_CHECK_EQUAL( envelope( escape )["error"]["code"].get<std::string>(), "invalid_path" );
+    }
+
+    // With the opt-in the board is created as a loadable KiCad 10 file; the apply then
+    // proceeds to the editor stage, which this headless test cannot satisfy.
+    JSON created = registry.Handle( "design", { { "operation", "apply" },
+                                                 { "path", "camera_front.kicad_kds" },
+                                                 { "boardPath", "camera_front.kicad_pcb" },
+                                                 { "createBoard", true },
+                                                 { "expectedSha256", hash } } );
+    BOOST_CHECK( !created.at( "success" ).get<bool>() );
+    BOOST_CHECK_NE( envelope( created )["error"]["code"].get<std::string>(), "invalid_path" );
+    const wxString boardPath = fixture.Root() + wxS( "/camera_front.kicad_pcb" );
+    BOOST_REQUIRE( wxFileName::FileExists( boardPath ) );
+    wxFFile  board( boardPath, wxS( "rb" ) );
+    wxString content;
+    BOOST_REQUIRE( board.IsOpened() && board.ReadAll( &content ) );
+    BOOST_CHECK( content.StartsWith( wxS( "(kicad_pcb" ) ) );
+    BOOST_CHECK_NE( content.Find( wxS( "(version 20260206)" ) ), wxNOT_FOUND );
+
+    // The created board is a regular inspectable project file from then on.
+    JSON summary = registry.Handle(
+            "inspect", { { "operation", "summary" }, { "path", "camera_front.kicad_pcb" } } );
+    BOOST_REQUIRE_MESSAGE( summary.at( "success" ).get<bool>(), summary.dump() );
+    BOOST_CHECK_EQUAL( envelope( summary )["data"]["rootHead"].get<std::string>(), "kicad_pcb" );
+}
+
+
 BOOST_AUTO_TEST_CASE( MatchesManagedDeletionsByIdentityAndToleratesAbsentItems )
 {
     // KiCad answers DeleteItems from a std::map<KIID, status>, i.e. in UUID order, while the
