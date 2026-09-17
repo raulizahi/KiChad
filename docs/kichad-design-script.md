@@ -1247,7 +1247,10 @@ replacing an editor-managed library implicitly would be destructive:
 ```
 
 `symbol` is semantic KDS, not embedded native s-expression text. A `common` unit maps graphics to
-native unit zero; numbered units range from 1 through 256. A root symbol can declare the exact
+native unit zero; numbered units range from 1 through 256. A unit may carry up to 1024 pins or
+none at all: mechanical parts such as lens holders, mounting hardware, and logos are declared,
+placed, and sourced like any component with a graphics-only unit and a footprint of non-plated
+holes or fab outlines, exactly like KiCad's own mounting-hole symbols. A root symbol can declare the exact
 body-style inventory once as `(body_styles demorgan)` or as 1 through 64 unique display names.
 Each unit's optional `body_style` selects that 1-based inventory. A numbered unit may carry one
 bounded `display_name`; declarations for the same unit across body styles must agree because KiCad
