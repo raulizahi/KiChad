@@ -50,19 +50,31 @@ version and makes the installed launchers self-contained. `./tools/fetch-kicad-l
 `./tools/install-kichad-libraries.sh` remain available when only the library runtime needs to be
 refreshed. Neither command tracks the libraries' moving development branch.
 
-## macOS development build (experimental)
+## macOS development build
 
-The qualified platform remains Ubuntu 24.04; macOS is a development convenience only.  The tracked
-`CMakePresets.json` stays Linux-only by policy, so the macOS configuration ships as a sample user
-preset:
+The qualified platform remains Ubuntu 24.04; macOS is a development platform.  The
+`feature/macos-port` branch is the macOS line: it is `feature/common-os-features` (the
+platform-neutral Codex work) plus the toolchain compatibility shims, the wxWidgets 3.3 Layers-panel
+fix, the display-move crash fix, and the tooling below.  The tracked `CMakePresets.json` stays
+Linux-only by policy, so the macOS configuration ships as a sample user preset:
 
 ```sh
 cp CMakeUserPresets.macos.sample.json CMakeUserPresets.json
 cmake --preset kichad-macos
 cmake --build --preset kichad-macos
+./tools/scaffold-kichad-macos-bundle.sh   # once, and again after rebuilds that relink editors
+./tools/run-kichad-macos.sh
 ```
 
-Notes on the sample:
+`scaffold-kichad-macos-bundle.sh` creates what CMake does not: stock library data linked from an
+official KiCad 10 install (schemas from this repository), the Python framework `Current` link
+without which the GUI aborts on startup, real copies of the standalone editor apps inside the
+bundle (symlinks break kiface lookup), the native Codex binary from the global npm package (the
+npm wrapper needs `node`, which GUI processes lack on `PATH`), the sibling `kicad/kicad-cli`
+wrapper the QA suite expects, and the QA suite's shared data link.  Locations are overridable
+through `KICHAD_OFFICIAL_KICAD_APP`, `KICHAD_PYTHON_FRAMEWORK`, and `KICHAD_CODEX_BINARY`.
+
+Notes on the sample preset:
 
 - Paths assume arm64 Homebrew under `/opt/homebrew`; on Intel Macs substitute `/usr/local`.
 - Boost is pinned to the `boost@1.85` keg: Boost 1.90 removed the Boost.Process v1 API used by
@@ -71,11 +83,12 @@ Notes on the sample:
 - The preset pins the `python@3.13` framework, `protobuf@33`, `opencascade`, and `libngspice`
   kegs; install those plus KiCad's usual build dependencies (wxWidgets, ninja, ccache, glew, glm,
   cairo, …) from Homebrew.
-- Building this source line on macOS requires the toolchain compatibility shims from the
-  `feature/macos-build-compat` branch until they are merged.
-- Developer builds expect a `codex` executable on `PATH` (distribution packaging is not covered
-  here).  Running the GUI and the QA suite from the build tree additionally needs bundle
-  scaffolding (SharedSupport data, a `Python.framework` link) that no script creates yet.
+- Run the QA suite from the build tree, e.g. `build/release-macos/qa/tests/common/qa_common -t
+  CodexToolRegistry`.  Remaining macOS-only failures are environmental (headless clipboard,
+  network fetches, one path-canonicalization test) rather than product defects.
+- The vendored Codex binary embeds Node; a very long session can exhaust its heap and KiChad then
+  reports "Codex app-server exited with status -5".  Start a new conversation, or update
+  `@openai/codex`.
 
 ## Useful checks
 
