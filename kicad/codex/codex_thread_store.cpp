@@ -260,3 +260,108 @@ std::string CODEX_THREAD_STORE::projectKey( const wxString& aProjectPath ) const
     path.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
     return std::string( path.GetFullPath().ToUTF8() );
 }
+
+
+std::vector<CODEX_THREAD_STORE::MESSAGE>
+CODEX_THREAD_STORE::ParseDialogLog( const std::string& aLog, size_t aMaxBytes )
+{
+    std::vector<MESSAGE> messages;
+    size_t               pos = 0;
+
+    const auto isHeaderAt = [&]( size_t aPos, std::string& aRole, size_t& aBodyStart )
+    {
+        // "[YYYY-MM-DD HH:MM:SS] ROLE:\n"
+        if( aPos + 22 > aLog.size() || aLog[aPos] != '[' || aLog[aPos + 20] != ']'
+            || aLog[aPos + 21] != ' ' )
+            return false;
+
+        for( size_t i = 1; i < 20; ++i )
+        {
+            const char c = aLog[aPos + i];
+            const bool digit = c >= '0' && c <= '9';
+            const bool separator = c == '-' || c == ' ' || c == ':';
+
+            if( !digit && !separator )
+                return false;
+        }
+
+        const size_t colon = aLog.find( ":\n", aPos + 22 );
+
+        if( colon == std::string::npos || colon - ( aPos + 22 ) > 16 )
+            return false;
+
+        aRole = aLog.substr( aPos + 22, colon - ( aPos + 22 ) );
+        aBodyStart = colon + 2;
+        return true;
+    };
+
+    while( pos < aLog.size() )
+    {
+        std::string role;
+        size_t      bodyStart = 0;
+
+        if( !isHeaderAt( pos, role, bodyStart ) )
+        {
+            const size_t next = aLog.find( "\n[", pos );
+
+            if( next == std::string::npos )
+                break;
+
+            pos = next + 1;
+            continue;
+        }
+
+        // The body runs until the next header at a line start.
+        size_t bodyEnd = bodyStart;
+
+        while( true )
+        {
+            const size_t candidate = aLog.find( "\n[", bodyEnd );
+
+            if( candidate == std::string::npos )
+            {
+                bodyEnd = aLog.size();
+                break;
+            }
+
+            std::string nextRole;
+            size_t      nextBody = 0;
+
+            if( isHeaderAt( candidate + 1, nextRole, nextBody ) )
+            {
+                bodyEnd = candidate + 1;
+                break;
+            }
+
+            bodyEnd = candidate + 1;
+        }
+
+        std::string text = aLog.substr( bodyStart, bodyEnd - bodyStart );
+
+        while( !text.empty() && ( text.back() == '\n' || text.back() == '\r' || text.back() == ' ' ) )
+            text.pop_back();
+
+        if( role == "USER" )
+            messages.push_back( { "user", std::move( text ) } );
+        else if( role == "CODEX" )
+            messages.push_back( { "assistant", std::move( text ) } );
+
+        pos = bodyEnd;
+    }
+
+    // Keep the most recent messages that fit the byte budget, starting on a user message.
+    size_t total = 0;
+    size_t keepFrom = messages.size();
+
+    while( keepFrom > 0 && total + messages[keepFrom - 1].text.size() <= aMaxBytes )
+    {
+        --keepFrom;
+        total += messages[keepFrom].text.size();
+    }
+
+    while( keepFrom < messages.size() && messages[keepFrom].role != "user" )
+        ++keepFrom;
+
+    messages.erase( messages.begin(), messages.begin() + static_cast<long>( keepFrom ) );
+    return messages;
+}

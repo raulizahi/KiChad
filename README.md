@@ -67,7 +67,8 @@ stored by Codex in an isolated KiChad Codex home, not in the project; set `KICHA
 when you intentionally want a different state location.  The design-tool boundary and safety model
 are documented in [docs/kichad-codex-architecture.md](docs/kichad-codex-architecture.md).  Each
 submitted turn first snapshots the project through KiCad's local-history system, and the panel can
-restore that complete pre-turn state.  The initial native `project` and `inspect` calls expose
+restore that complete pre-turn state.  Starting a new conversation keeps the project's history by
+default, so requirements never need repeating after a tool or policy update.  The initial native `project` and `inspect` calls expose
 project context and bounded, read-only KiCad 10 design inspection without shell or GUI automation.
 `inspect.render` uses the matching native KiCad backend to attach a cropped schematic, production
 PCB (`pcb2d`), assembly/layout PCB (`pcblayout`, including Fab fields and courtyards), or 3D board

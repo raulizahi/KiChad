@@ -234,7 +234,8 @@ CODEX_PANEL::CODEX_PANEL( wxWindow* aParent, std::function<wxString()> aProjectP
     m_newConversationButton = new wxButton( this, wxID_ANY, wxEmptyString, wxDefaultPosition,
                                             wxDefaultSize, wxBU_EXACTFIT );
     m_newConversationButton->SetBitmap( KiBitmapBundle( BITMAPS::new_document ) );
-    m_newConversationButton->SetToolTip( _( "Start a new Codex conversation" ) );
+    m_newConversationButton->SetToolTip( _( "Start a new Codex conversation; the project's "
+                                            "history can be carried into it" ) );
     m_newConversationButton->SetName( _( "New conversation" ) );
     m_newConversationButton->Disable();
     conversationRow->Add( m_processStatus, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP( 8 ) );
@@ -2144,20 +2145,65 @@ void CODEX_PANEL::onNewConversation( wxCommandEvent& aEvent )
         return;
     }
 
-    wxString clearError;
+    // A fresh thread picks up the current tool set and policy.  By default the project's
+    // conversation history travels with it, so requirements stated earlier are not lost;
+    // clearing is an explicit choice.
+    wxMessageDialog choice( this,
+                            _( "Start a new Codex conversation for this project?\n\n"
+                               "Keep history: the new conversation is seeded with everything "
+                               "said so far, so nothing needs repeating.\n"
+                               "Clear history: the new conversation starts from the project "
+                               "files alone." ),
+                            _( "New Codex conversation" ),
+                            wxYES_NO | wxCANCEL | wxICON_QUESTION );
+    choice.SetYesNoCancelLabels( _( "Keep history" ), _( "Clear history" ), _( "Cancel" ) );
+    const int decision = choice.ShowModal();
 
-    if( !m_threadStore.Clear( m_threadProjectPath, &clearError ) )
-    {
-        appendTranscript( wxString::Format( _( "\n[Could not start a new conversation: %s]\n" ),
-                                            clearError ) );
+    if( decision == wxID_CANCEL )
         return;
+
+    const bool keepHistory = decision == wxID_YES;
+
+    if( keepHistory && m_conversationHistory.empty() )
+    {
+        // The saved binding may already be gone (an earlier cleared conversation); the
+        // project's transcript log still has everything.
+        wxString dir = m_projectPathProvider ? m_projectPathProvider() : wxString();
+        wxFFile  log( wxFileName( dir, wxS( "codex_dialog.txt" ) ).GetFullPath(), wxS( "rb" ) );
+        wxString text;
+
+        if( log.IsOpened() && log.ReadAll( &text, wxConvUTF8 ) )
+        {
+            m_conversationHistory =
+                    CODEX_THREAD_STORE::ParseDialogLog( std::string( text.ToUTF8() ) );
+        }
     }
 
     const std::string previousThreadId =
             m_threadId.empty() ? m_savedThreadId : m_threadId;
+
+    if( keepHistory )
+    {
+        // Leave the binding in place (it still names the archived thread) so a relaunch before
+        // the next Send renders the same history; the next thread start re-seeds from it.
+        persistConversation();
+    }
+    else
+    {
+        wxString clearError;
+
+        if( !m_threadStore.Clear( m_threadProjectPath, &clearError ) )
+        {
+            appendTranscript( wxString::Format( _( "\n[Could not start a new conversation: %s]\n" ),
+                                                clearError ) );
+            return;
+        }
+
+        m_conversationHistory.clear();
+    }
+
     m_threadId.clear();
     m_savedThreadId.clear();
-    m_conversationHistory.clear();
     m_currentAgentMessage.clear();
     m_turnId.clear();
     m_turnSnapshotHash.clear();
@@ -2167,7 +2213,19 @@ void CODEX_PANEL::onNewConversation( wxCommandEvent& aEvent )
     m_agentResponseOpen = false;
     m_transcript->Clear();
     m_activity->Clear();
-    appendTranscript( _( "[New conversation started. The previous context has been cleared.]\n" ) );
+
+    if( keepHistory )
+    {
+        renderConversation();
+        appendTranscript( wxString::Format(
+                _( "\n[New conversation started with %zu earlier messages carried over.]\n" ),
+                m_conversationHistory.size() ) );
+    }
+    else
+    {
+        appendTranscript( _( "[New conversation started. The previous context has been cleared.]\n" ) );
+    }
+
     setStatus( _( "New Codex conversation ready." ) );
     setBusy( false );
 

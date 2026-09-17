@@ -146,6 +146,10 @@ top-level `(fab "NAME")` declares the fabrication vendor profile for tools that 
 directly, and components declared `(footprint none)` materialize as `(on_board no)` so external
 parts never trip schematic parity.
 
+The panel's new-conversation button asks whether to keep the project's history; keeping it seeds the
+fresh thread with the saved transcript (recovered from `codex_dialog.txt` when the saved binding is
+gone), so a tool or policy update never costs a project its stated requirements.
+
 Related behavior notes: generated schematic net labels anchor exactly on pin endpoints (no stub
 wires), schematic parity DRC always compares against the on-disk schematic rather than an open
 editor's in-memory document, and every Codex exchange is appended to `codex_dialog.txt` in the

@@ -12,6 +12,7 @@
 #include <qa_utils/wx_utils/unit_test_utils.h>
 
 #include <kicad/codex/codex_tool_registry.h>
+#include <kicad/codex/codex_tool_internal.h>
 #include <kicad/codex/design_script_pcb_planner.h>
 #include <kicad/codex/kicad_ipc_client.h>
 #include <kicad/codex/managed_footprint_library_io.h>
@@ -170,6 +171,15 @@ public:
     TOOL_PROJECT_FIXTURE()
     {
         wxFileName root = wxFileName::DirName( wxFileName::GetTempDir() );
+
+#ifndef __WXMSW__
+        // The fake KiCad IPC server binds a Unix socket below this directory, and Unix socket
+        // paths are limited to about 100 bytes.  macOS temp directories alone are ~50 bytes,
+        // so fall back to /tmp whenever the default would push the socket past the limit.
+        if( root.GetFullPath().length() > 40 && wxFileName::DirExists( wxS( "/tmp" ) ) )
+            root = wxFileName::DirName( wxS( "/tmp" ) );
+#endif
+
         root.AppendDir( wxS( "kichad-codex-tools-" ) + KIID().AsString() );
         m_root = root.GetFullPath();
         BOOST_REQUIRE( wxFileName::Mkdir( m_root, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL ) );
@@ -1978,6 +1988,98 @@ BOOST_AUTO_TEST_CASE( CreatesPcbItemsInsideAnIpcTransaction )
 }
 
 
+BOOST_AUTO_TEST_CASE( MatchesManagedDeletionsByIdentityAndToleratesAbsentItems )
+{
+    // KiCad answers DeleteItems from a std::map<KIID, status>, i.e. in UUID order, while the
+    // reconciler emits shape deletions before footprint deletions.  A full design replacement
+    // therefore sends deletions out of UUID order; results must be matched by identity.
+    TOOL_PROJECT_FIXTURE fixture;
+    wxFileName socketPath( fixture.Root(), wxS( "api-delete-test.sock" ) );
+    KINNG_REQUEST_SERVER server( "ipc://" + socketPath.GetFullPath().ToStdString() );
+    const std::string token = "qa-delete-token";
+    const std::string shapeId = "f0000000-0000-8000-8000-000000000001";
+    const std::string footprintA = "00000000-0000-8000-8000-00000000000a";
+    const std::string footprintB = "00000000-0000-8000-8000-00000000000b";
+    std::string immutableId;
+    std::vector<std::string> requestedOrder;
+
+    server.SetCallback(
+            [&]( std::string* aSerializedRequest )
+            {
+                kiapi::common::ApiRequest request;
+                kiapi::common::ApiResponse response;
+                response.mutable_header()->set_kicad_token( token );
+
+                if( request.ParseFromString( *aSerializedRequest )
+                    && request.message().Is<kiapi::common::commands::DeleteItems>() )
+                {
+                    kiapi::common::commands::DeleteItems remove;
+                    kiapi::common::commands::DeleteItemsResponse deleted;
+                    request.message().UnpackTo( &remove );
+                    std::map<KIID, kiapi::common::commands::ItemDeletionStatus> results;
+
+                    for( const auto& id : remove.item_ids() )
+                    {
+                        requestedOrder.push_back( id.value() );
+                        results[KIID( id.value() )] =
+                                id.value() == immutableId ? kiapi::common::commands::IDS_IMMUTABLE
+                                : id.value() == footprintB ? kiapi::common::commands::IDS_NONEXISTENT
+                                                           : kiapi::common::commands::IDS_OK;
+                    }
+
+                    for( const auto& [id, status] : results )
+                    {
+                        auto* result = deleted.add_deleted_items();
+                        result->mutable_id()->set_value( id.AsStdString() );
+                        result->set_status( status );
+                    }
+
+                    deleted.set_status( kiapi::common::types::IRS_OK );
+                    response.mutable_status()->set_status( kiapi::common::AS_OK );
+                    response.mutable_message()->PackFrom( deleted );
+                }
+                else
+                {
+                    response.mutable_status()->set_status( kiapi::common::AS_UNHANDLED );
+                }
+
+                server.Reply( response.SerializeAsString() );
+            } );
+
+    KICHAD_IPC_CLIENT client( "org.kichad.qa", fixture.Root(), std::chrono::milliseconds( 2000 ) );
+    KICHAD_IPC_TARGET target;
+    target.socketUrl = "ipc://" + socketPath.GetFullPath().ToStdString();
+    target.kicadToken = token;
+    target.document.set_type( kiapi::common::types::DOCTYPE_PCB );
+    target.document.set_board_filename( "design.kicad_pcb" );
+
+    // Shape first, then footprints: request order f000…, 0000…a, 0000…b; KiCad replies sorted.
+    const JSON actions = JSON::array(
+            { { { "action", "delete" }, { "itemType", "shape" }, { "logicalId", "perimeter" },
+                { "itemId", shapeId } },
+              { { "action", "delete" }, { "itemType", "footprint" }, { "logicalId", "R1" },
+                { "itemId", footprintA } },
+              { { "action", "delete" }, { "itemType", "footprint" }, { "logicalId", "R2" },
+                { "itemId", footprintB } } } );
+    std::string error;
+    BOOST_CHECK_MESSAGE( KICHAD::CODEX_TOOLS::ExecutePcbActions( client, target, actions,
+                                                                  JSON::object(), error ),
+                         error );
+    BOOST_REQUIRE_EQUAL( requestedOrder.size(), 3 );
+    BOOST_CHECK_EQUAL( requestedOrder[0], shapeId );
+
+    // A genuinely refused deletion names the item and the reason.
+    immutableId = footprintA;
+    BOOST_CHECK( !KICHAD::CODEX_TOOLS::ExecutePcbActions( client, target, actions, JSON::object(),
+                                                          error ) );
+    BOOST_CHECK_NE( error.find( footprintA ), std::string::npos );
+    BOOST_CHECK_NE( error.find( "R1" ), std::string::npos );
+    BOOST_CHECK_NE( error.find( "immutable" ), std::string::npos );
+
+    server.Stop();
+}
+
+
 BOOST_AUTO_TEST_CASE( AppliesReusableDesignsIdempotentlyWithManagedState )
 {
     TOOL_PROJECT_FIXTURE fixture;
@@ -2212,13 +2314,23 @@ BOOST_AUTO_TEST_CASE( AppliesReusableDesignsIdempotentlyWithManagedState )
 
                     if( request.message().UnpackTo( &remove ) )
                     {
+                        // KiCad answers from a std::map<KIID, status>, so results arrive in
+                        // UUID order rather than request order.
+                        std::map<KIID, kiapi::common::commands::ItemDeletionStatus> results;
+
                         for( const auto& id : remove.item_ids() )
                         {
+                            results[KIID( id.value() )] =
+                                    liveItems.erase( id.value() ) == 1
+                                            ? kiapi::common::commands::IDS_OK
+                                            : kiapi::common::commands::IDS_NONEXISTENT;
+                        }
+
+                        for( const auto& [id, status] : results )
+                        {
                             auto* result = deleted.add_deleted_items();
-                            result->mutable_id()->CopyFrom( id );
-                            result->set_status( liveItems.erase( id.value() ) == 1
-                                                        ? kiapi::common::commands::IDS_OK
-                                                        : kiapi::common::commands::IDS_NONEXISTENT );
+                            result->mutable_id()->set_value( id.AsStdString() );
+                            result->set_status( status );
                         }
 
                         deleted.set_status( kiapi::common::types::IRS_OK );

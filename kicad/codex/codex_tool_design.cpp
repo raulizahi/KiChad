@@ -2638,7 +2638,9 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
         {
             std::string dropError;
             const bool  dropped = commit.Drop( dropError );
-            std::string message = pathError + "; the apply journal was retained for safe recovery";
+            std::string message = pathError
+                                  + "; the apply journal was retained and is merged automatically "
+                                    "on the next apply, so fix the cause and run design.apply again";
 
             if( !dropped && !dropError.empty() )
                 message += "; transaction drop also failed: " + dropError;
@@ -2652,7 +2654,9 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDesign(
         {
             std::string dropError;
             const bool  dropped = commit.Drop( dropError );
-            std::string message = pathError + "; the apply journal was retained for safe recovery";
+            std::string message = pathError
+                                  + "; the apply journal was retained and is merged automatically "
+                                    "on the next apply, so fix the cause and run design.apply again";
 
             if( !dropped && !dropError.empty() )
                 message += "; transaction drop also failed: " + dropError;

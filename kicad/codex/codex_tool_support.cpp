@@ -6799,23 +6799,43 @@ bool executePcbActions( const KICHAD_IPC_CLIENT& aClient, const KICHAD_IPC_TARGE
         kiapi::common::commands::DeleteItemsResponse deleted;
 
         if( !response.message().UnpackTo( &deleted )
-            || deleted.status() != kiapi::common::types::IRS_OK
-            || deleted.deleted_items_size() != static_cast<int>( end - begin ) )
+            || deleted.status() != kiapi::common::types::IRS_OK )
         {
             aError = "KiCad returned an invalid delete-items response";
             return false;
         }
 
+        // KiCad reports deletion results keyed by UUID in its own (sorted) order, not in
+        // request order, so match them by identity.  An item that is already absent from the
+        // live board is the desired end state, not a failure: the design is converging on the
+        // requested content regardless of what the editor held before.
+        std::map<std::string, kiapi::common::commands::ItemDeletionStatus> results;
+
         for( int i = 0; i < deleted.deleted_items_size(); ++i )
+            results[deleted.deleted_items( i ).id().value()] = deleted.deleted_items( i ).status();
+
+        for( size_t i = begin; i < end; ++i )
         {
-            if( deleted.deleted_items( i ).status() != kiapi::common::commands::IDS_OK
-                || deleted.deleted_items( i ).id().value()
-                           != deletes[begin + static_cast<size_t>( i )]
-                                      ->at( "itemId" ).get<std::string>() )
+            const std::string itemId = deletes[i]->at( "itemId" ).get<std::string>();
+            const auto        result = results.find( itemId );
+
+            if( result == results.end() )
             {
-                aError = "KiCad rejected or changed a managed PCB deletion";
+                aError = "KiCad did not report the deletion of managed PCB item " + itemId;
                 return false;
             }
+
+            if( result->second == kiapi::common::commands::IDS_OK
+                || result->second == kiapi::common::commands::IDS_NONEXISTENT )
+                continue;
+
+            aError = "KiCad refused to delete managed PCB item " + itemId + " ("
+                     + deletes[i]->value( "itemType", "item" ) + " "
+                     + deletes[i]->value( "logicalId", "" ) + "): "
+                     + ( result->second == kiapi::common::commands::IDS_IMMUTABLE
+                                 ? "the item is immutable through the API"
+                                 : "deletion status " + std::to_string( result->second ) );
+            return false;
         }
     }
 

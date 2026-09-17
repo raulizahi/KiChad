@@ -33,6 +33,10 @@ authentication there; KiChad never stores access tokens in a project or its sett
 
 Before each submitted Codex turn, the project manager asks KiCad's registered schematic, board,
 and project savers for a coherent incremental-history snapshot and records its commit identifier.
+The panel's **New conversation** action starts a fresh thread bound to the current tool set and
+policy and, by default, seeds it with the project's saved transcript (recovered from
+`codex_dialog.txt` when the saved binding is gone) so stated requirements survive; clearing the
+history is an explicit choice in the same dialog.
 The panel's **Revert turn** action closes open editors through the normal KiCad flow and restores
 that exact pre-turn state.  If a snapshot cannot be established, mutating native tools stay locked;
 read-only conversation and inspection can continue.
@@ -219,7 +223,11 @@ KDS is the only external representation of design intent. Internal JSON IR, tran
 managed-state records, and protobuf messages are compiler implementation details. The hidden
 `*.kicad_kds_state` file records only deterministic ownership identities needed for idempotent
 reconciliation; a short-lived `*.kicad_kds_journal` safely carries ownership across an interrupted
-apply. The generated `.kicad_dru` file is likewise an internal compiler artifact; conditional-rule
+apply and is merged automatically by the next apply, so a retained journal is never a blocker.
+Managed deletions are matched to KiCad's per-item results by UUID (KiCad answers in UUID order,
+not request order), an item already absent from the live board counts as deleted, and a genuine
+refusal names the item and the reason; a wholesale design replacement therefore converges the
+existing project onto the new design regardless of stale editor state. The generated `.kicad_dru` file is likewise an internal compiler artifact; conditional-rule
 intent is authored only in the exported `.kicad_kds` sidecar. Its exact prior presence and bytes are
 journaled so a failed apply restores both the file and live DRC engine. Existing schematic-linked
 footprints are resolved uniquely by reference and transformed in place. When a referenced footprint
