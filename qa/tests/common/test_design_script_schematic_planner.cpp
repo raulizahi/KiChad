@@ -14,6 +14,8 @@
 #include <kicad/codex/design_script_compiler.h>
 #include <kicad/codex/design_script_pcb_planner.h>
 #include <kicad/codex/design_script_schematic_planner.h>
+#include <kicad/codex/design_script_symbol_library_generator.h>
+#include <kicad/codex/design_script_symbol_resolver.h>
 #include <kicad/codex/lossless_sexpr_document.h>
 
 #include <wx/file.h>
@@ -103,6 +105,62 @@ BOOST_AUTO_TEST_CASE( LowersHierarchyIntoStableNativeExpressionsAndPaths )
                         file["newDocumentSource"].get<std::string>(), &parseError ),
                 parseError );
     }
+}
+
+
+BOOST_AUTO_TEST_CASE( AcceptsPinlessMechanicalSymbolsSuchAsLensHolders )
+{
+    // Mechanical parts (lens holders, mounting hardware, logos) are placed, sourced, and
+    // reviewed like any component but carry no electrical pins, exactly like KiCad's own
+    // mounting-hole symbols.  They must compile and plan, not be rejected for having no pins.
+    const std::string source = R"KDS((kichad_design
+  (version 1)
+  (project holders)
+  (sheet root
+    (parent none)
+    (file "holders.kicad_sch")
+    (title "Holders"))
+  (library symbol Mechanical (table project) (uri "${KIPRJMOD}/Mechanical.kicad_sym") (managed true))
+  (library footprint Mechanical_Packages (table project) (uri "${KIPRJMOD}/Mechanical_Packages.pretty") (managed true))
+  (symbol Mechanical:LensHolder (reference H) (value "M12 holder") (in_bom true) (on_board true)
+    (unit 1 (rectangle body (from -12.7mm -7.62mm) (to 12.7mm 7.62mm) (stroke 0.254mm solid) (fill background))))
+  (footprint Mechanical_Packages:PT_LH031M (reference H) (value PT-LH031M)
+    (description "M12 lens holder, two 2.6mm clearance holes")
+    (attributes (smd false) (through_hole false) (board_only false) (exclude_from_position true)
+      (exclude_from_bom false) (allow_missing_courtyard true) (dnp false) (allow_soldermask_bridges false))
+    (pad hole1 (number "") (type np_thru_hole) (shape circle) (at -10mm 0mm) (rotation 0deg) (size 2.6mm 2.6mm) (layers all_copper all_mask) (drill round 2.6mm))
+    (pad hole2 (number "") (type np_thru_hole) (shape circle) (at 10mm 0mm) (rotation 0deg) (size 2.6mm 2.6mm) (layers all_copper all_mask) (drill round 2.6mm))
+    (circle thread (center 0mm 0mm) (radius 6mm) (stroke 0.1mm solid) (layers F.Fab) (fill none)))
+  (component H101 (symbol Mechanical:LensHolder) (value "PT-LH031M") (footprint Mechanical_Packages:PT_LH031M)
+    (unit 1 (sheet root) (at 76.2mm 76.2mm) (rotation 0deg) (mirror none)))
+))KDS";
+    KICHAD::DESIGN_SCRIPT_COMPILER::RESULT compiled =
+            KICHAD::DESIGN_SCRIPT_COMPILER::Compile( source );
+    BOOST_REQUIRE_MESSAGE( compiled.ok, compiled.diagnostics.dump() );
+
+    for( const auto& diagnostic : compiled.diagnostics )
+        BOOST_CHECK_NE( diagnostic.value( "code", "" ), "invalid_symbol_pin_count" );
+
+    // The same path apply takes: generate the managed library, resolve, then plan.
+    KICHAD::DESIGN_SCRIPT_SYMBOL_LIBRARY_GENERATOR::RESULT generated =
+            KICHAD::DESIGN_SCRIPT_SYMBOL_LIBRARY_GENERATOR::Generate( compiled.ir );
+    BOOST_REQUIRE_MESSAGE( generated.ok, generated.diagnostics.dump() );
+    BOOST_CHECK_EQUAL( generated.counts["pins"].get<int>(), 0 );
+
+    KICHAD::DESIGN_SCRIPT_SYMBOL_RESOLVER::RESULT resolved =
+            KICHAD::DESIGN_SCRIPT_SYMBOL_RESOLVER::Resolve( compiled.ir, generated.sources );
+    BOOST_REQUIRE_MESSAGE( resolved.ok, resolved.diagnostics.dump() );
+
+    KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::RESULT planned =
+            KICHAD::DESIGN_SCRIPT_SCHEMATIC_PLANNER::Plan( compiled.ir, nlohmann::json::object(),
+                                                            resolved.symbols );
+    BOOST_REQUIRE_MESSAGE( planned.fullyLowered, planned.diagnostics.dump() );
+    BOOST_CHECK_EQUAL( planned.counts["components"].get<int>(), 1 );
+    BOOST_CHECK_NE( planned.operations.dump().find( "H101" ), std::string::npos );
+
+    KICHAD::DESIGN_SCRIPT_PCB_PLANNER::RESULT board =
+            KICHAD::DESIGN_SCRIPT_PCB_PLANNER::Plan( compiled.ir, resolved.symbols );
+    BOOST_CHECK_MESSAGE( board.fullyLowered, board.diagnostics.dump() );
 }
 
 

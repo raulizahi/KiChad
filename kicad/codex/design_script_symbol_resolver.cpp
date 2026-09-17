@@ -893,11 +893,14 @@ DESIGN_SCRIPT_SYMBOL_RESOLVER::Resolve( const JSON& aCompilerIr, const JSON& aLi
                     pins.push_back( pin );
             }
 
-            if( pins.empty() || pins.size() > MAX_PINS_PER_UNIT )
+            // A unit may legitimately expose no pins: mechanical parts such as lens holders,
+            // mounting hardware and logos are placed and sourced like any component but carry
+            // no electrical connection, exactly as KiCad's own mounting-hole symbols do.
+            if( pins.size() > MAX_PINS_PER_UNIT )
             {
                 diagnostic( result, "invalid_symbol_pin_count",
                             "symbol " + libraryId + " unit " + std::to_string( unit )
-                                    + " must expose 1 through 1024 pins" );
+                                    + " must expose at most 1024 pins" );
                 continue;
             }
 
