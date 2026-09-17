@@ -232,7 +232,10 @@ boards is several KDS files in one project, each named after its KDS project so
 `<name>.kicad_kds`, `<name>.kicad_sch` (the KDS root sheet) and `<name>.kicad_pcb` pair up for DRC
 parity and fabrication; `design.apply` with `createBoard: true` writes a new empty KiCad 10 board
 at a project-confined path before opening it in the editor, so a second board never has to be
-created by hand.  Boards in one project share the project's design rules and netclasses. The generated `.kicad_dru` file is likewise an internal compiler artifact; conditional-rule
+created by hand.  KiCad keeps one active project per session, so opening the second board loads
+its own `<name>.kicad_pro` (created on first open) and unloads the first; the panel keeps its
+binding and turn snapshot across that swap because both boards share the project directory, and
+each board keeps its own design rules and netclasses. The generated `.kicad_dru` file is likewise an internal compiler artifact; conditional-rule
 intent is authored only in the exported `.kicad_kds` sidecar. Its exact prior presence and bytes are
 journaled so a failed apply restores both the file and live DRC engine. Existing schematic-linked
 footprints are resolved uniquely by reference and transformed in place. When a referenced footprint

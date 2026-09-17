@@ -148,7 +148,8 @@ parts never trip schematic parity.
 
 A project may hold several boards: one KDS per board, each named after its KDS project so the KDS,
 root schematic, and board files pair up, with `design.apply` creating a missing board on request
-(`createBoard: true`). Boards in one project share design rules and netclasses.
+(`createBoard: true`). Opening the second board switches KiCad's single active project to that
+board's own `<name>.kicad_pro`, so design rules and netclasses are per board.
 
 The panel's new-conversation button asks whether to keep the project's history; keeping it seeds the
 fresh thread with the saved transcript (recovered from `codex_dialog.txt` when the saved binding is
