@@ -7223,9 +7223,23 @@ bool KICHAD::CODEX_TOOLS::RunNativeKiCadPreview(
  * redirect the document outside the project; the leaf must carry a .pdf extension so the tool
  * can never overwrite a design source.
  */
-bool KICHAD::CODEX_TOOLS::ResolveProjectPdfDestination( const wxString& aProjectPath, const std::string& aRelativePath,
-                            wxFileName& aResolved, std::string& aRelativeResolved,
-                            std::string& aError )
+bool KICHAD::CODEX_TOOLS::ResolveProjectPdfDestination( const wxString& aProjectPath,
+                                                         const std::string& aRelativePath,
+                                                         wxFileName& aResolved,
+                                                         std::string& aRelativeResolved,
+                                                         std::string& aError )
+{
+    return ResolveProjectDestination( aProjectPath, aRelativePath, "pdf", aResolved,
+                                      aRelativeResolved, aError );
+}
+
+
+bool KICHAD::CODEX_TOOLS::ResolveProjectDestination( const wxString& aProjectPath,
+                                                      const std::string& aRelativePath,
+                                                      const std::string& aExtension,
+                                                      wxFileName& aResolved,
+                                                      std::string& aRelativeResolved,
+                                                      std::string& aError )
 {
     wxString   relative = wxString::FromUTF8( aRelativePath );
     wxFileName candidate( relative );
@@ -7238,9 +7252,9 @@ bool KICHAD::CODEX_TOOLS::ResolveProjectPdfDestination( const wxString& aProject
         return false;
     }
 
-    if( candidate.GetExt().Lower() != wxS( "pdf" ) )
+    if( candidate.GetExt().Lower() != wxString::FromUTF8( aExtension ) )
     {
-        aError = "output must end in .pdf";
+        aError = "output must end in ." + aExtension;
         return false;
     }
 
@@ -7292,7 +7306,7 @@ bool KICHAD::CODEX_TOOLS::ResolveProjectPdfDestination( const wxString& aProject
 
     wxFileName resolved( ancestor.GetPath(), candidate.GetFullName() );
 
-    if( resolved.FileExists() )
+    if( resolved.FileExists() && aExtension == "pdf" )
     {
         wxFile existing( resolved.GetFullPath(), wxFile::read );
         char signature[5] = { 0 };

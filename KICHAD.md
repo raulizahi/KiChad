@@ -146,6 +146,10 @@ top-level `(fab "NAME")` declares the fabrication vendor profile for tools that 
 directly, and components declared `(footprint none)` materialize as `(on_board no)` so external
 parts never trip schematic parity.
 
+A project may hold several boards: one KDS per board, each named after its KDS project so the KDS,
+root schematic, and board files pair up, with `design.apply` creating a missing board on request
+(`createBoard: true`). Boards in one project share design rules and netclasses.
+
 The panel's new-conversation button asks whether to keep the project's history; keeping it seeds the
 fresh thread with the saved transcript (recovered from `codex_dialog.txt` when the saved binding is
 gone), so a tool or policy update never costs a project its stated requirements.

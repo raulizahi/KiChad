@@ -227,7 +227,12 @@ apply and is merged automatically by the next apply, so a retained journal is ne
 Managed deletions are matched to KiCad's per-item results by UUID (KiCad answers in UUID order,
 not request order), an item already absent from the live board counts as deleted, and a genuine
 refusal names the item and the reason; a wholesale design replacement therefore converges the
-existing project onto the new design regardless of stale editor state. The generated `.kicad_dru` file is likewise an internal compiler artifact; conditional-rule
+existing project onto the new design regardless of stale editor state.  A product with several
+boards is several KDS files in one project, each named after its KDS project so
+`<name>.kicad_kds`, `<name>.kicad_sch` (the KDS root sheet) and `<name>.kicad_pcb` pair up for DRC
+parity and fabrication; `design.apply` with `createBoard: true` writes a new empty KiCad 10 board
+at a project-confined path before opening it in the editor, so a second board never has to be
+created by hand.  Boards in one project share the project's design rules and netclasses. The generated `.kicad_dru` file is likewise an internal compiler artifact; conditional-rule
 intent is authored only in the exported `.kicad_kds` sidecar. Its exact prior presence and bytes are
 journaled so a failed apply restores both the file and live DRC engine. Existing schematic-linked
 footprints are resolved uniquely by reference and transformed in place. When a referenced footprint

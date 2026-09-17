@@ -166,6 +166,10 @@ bool RunNativeKiCadPreview( const std::string& aView, const wxFileName& aInput,
 bool ResolveProjectPdfDestination( const wxString& aProjectPath, const std::string& aRelativePath,
                                    wxFileName& aResolved, std::string& aRelativeResolved,
                                    std::string& aError );
+/** Same confinement for any extension (no dot), e.g. "kicad_pcb" for a board to be created. */
+bool ResolveProjectDestination( const wxString& aProjectPath, const std::string& aRelativePath,
+                                const std::string& aExtension, wxFileName& aResolved,
+                                std::string& aRelativeResolved, std::string& aError );
 /** Rasterize one PDF page to a margin-cropped PNG with pdftoppm from PATH. */
 bool RasterizePdfPreview( const wxFileName& aPdf, const wxFileName& aOutput,
                           std::string& aError, int aPage = 1 );
