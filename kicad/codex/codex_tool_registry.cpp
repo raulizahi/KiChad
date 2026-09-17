@@ -301,7 +301,8 @@ CODEX_TOOL_REGISTRY::CODEX_TOOL_REGISTRY( std::function<wxString()> aProjectPath
                                                   aSymbolLibraryValidator,
                                           std::function<bool( const wxFileName&, std::string& )>
                                                   aFootprintLibraryValidator,
-                                          NATIVE_PREVIEW_RUNNER aNativePreviewRunner ) :
+                                          NATIVE_PREVIEW_RUNNER aNativePreviewRunner,
+                                          NATIVE_PDF_RUNNER aNativePdfRunner ) :
         m_projectPathProvider( std::move( aProjectPathProvider ) ),
         m_mutationGuard( std::move( aMutationGuard ) ),
         m_ipcSocketDirectoryProvider( std::move( aIpcSocketDirectoryProvider ) ),
@@ -310,7 +311,8 @@ CODEX_TOOL_REGISTRY::CODEX_TOOL_REGISTRY( std::function<wxString()> aProjectPath
         m_nativeFabricationRunner( std::move( aNativeFabricationRunner ) ),
         m_symbolLibraryValidator( std::move( aSymbolLibraryValidator ) ),
         m_footprintLibraryValidator( std::move( aFootprintLibraryValidator ) ),
-        m_nativePreviewRunner( std::move( aNativePreviewRunner ) )
+        m_nativePreviewRunner( std::move( aNativePreviewRunner ) ),
+        m_nativePdfRunner( std::move( aNativePdfRunner ) )
 {}
 
 
@@ -363,7 +365,9 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::Specs() const
                                 KICHAD::CODEX_TOOLS::DesignSpec(),
                                 KICHAD::CODEX_TOOLS::PcbSpec(),
                                 KICHAD::CODEX_TOOLS::VerifySpec(),
-                                KICHAD::CODEX_TOOLS::FabricateSpec() } );
+                                KICHAD::CODEX_TOOLS::FabricateSpec(),
+                                KICHAD::CODEX_TOOLS::DiagramSpec(),
+                                KICHAD::CODEX_TOOLS::DocumentSpec() } );
 
     // Advertising the layout tool while the user has external layout disabled invites
     // the agent to treat the switched-off tool as a blocker instead of routing in the
@@ -410,6 +414,10 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::HandleWithContext(
             result = handleVerify( aArguments, aProjectPath );
         else if( aTool == "layout" )
             result = handleLayout( aArguments, aProjectPath, aMutationAvailable );
+        else if( aTool == "diagram" )
+            result = handleDiagram( aArguments, aProjectPath );
+        else if( aTool == "document" )
+            result = handleDocument( aArguments, aProjectPath );
         else if( aTool == "fabricate" )
         {
             result = handleFabricate( aArguments, aProjectPath, aMutationAvailable,

@@ -240,17 +240,20 @@ BOOST_AUTO_TEST_CASE( AdvertisesOnlyImplementedNativeTools )
     CODEX_TOOL_REGISTRY registry( []() { return wxString(); } );
     JSON                specs = registry.Specs();
 
-    BOOST_REQUIRE_EQUAL( specs.size(), 6 );
+    BOOST_REQUIRE_EQUAL( specs.size(), 8 );
     BOOST_CHECK_EQUAL( specs[0]["name"].get<std::string>(), "project" );
     BOOST_CHECK_EQUAL( specs[1]["name"].get<std::string>(), "inspect" );
     BOOST_CHECK_EQUAL( specs[2]["name"].get<std::string>(), "design" );
     BOOST_CHECK_EQUAL( specs[3]["name"].get<std::string>(), "pcb" );
     BOOST_CHECK_EQUAL( specs[4]["name"].get<std::string>(), "verify" );
     BOOST_CHECK_EQUAL( specs[5]["name"].get<std::string>(), "fabricate" );
+    BOOST_CHECK_EQUAL( specs[6]["name"].get<std::string>(), "diagram" );
+    BOOST_CHECK_EQUAL( specs[7]["name"].get<std::string>(), "document" );
     const JSON& inspectOperations =
             specs[1]["inputSchema"]["properties"]["operation"]["enum"];
-    BOOST_REQUIRE_EQUAL( inspectOperations.size(), 3 );
+    BOOST_REQUIRE_EQUAL( inspectOperations.size(), 4 );
     BOOST_CHECK_EQUAL( inspectOperations[2].get<std::string>(), "render" );
+    BOOST_CHECK_EQUAL( inspectOperations[3].get<std::string>(), "pdf" );
     const JSON& designOperations =
             specs[2]["inputSchema"]["properties"]["operation"]["enum"];
     BOOST_REQUIRE_EQUAL( designOperations.size(), 9 );
@@ -279,8 +282,8 @@ BOOST_AUTO_TEST_CASE( AdvertisesOnlyImplementedNativeTools )
     // blocker.
     registry.SetExternalLayoutEnabled( true );
     JSON withLayout = registry.Specs();
-    BOOST_REQUIRE_EQUAL( withLayout.size(), 7 );
-    BOOST_CHECK_EQUAL( withLayout[6]["name"].get<std::string>(), "layout" );
+    BOOST_REQUIRE_EQUAL( withLayout.size(), 9 );
+    BOOST_CHECK_EQUAL( withLayout[8]["name"].get<std::string>(), "layout" );
 }
 
 
@@ -328,6 +331,101 @@ BOOST_AUTO_TEST_CASE( AttachesNativePreviewImagesToTheModel )
     BOOST_CHECK_EQUAL( envelope( mismatch )["error"]["code"].get<std::string>(),
                        "invalid_path" );
     BOOST_CHECK_EQUAL( calls, 1 );
+}
+
+
+BOOST_AUTO_TEST_CASE( WritesProjectConfinedPdfDocuments )
+{
+    TOOL_PROJECT_FIXTURE fixture;
+    std::vector<std::string> kinds;
+    std::vector<std::string> layers;
+    const std::string pdfBody = "%PDF-1.7\n1 0 obj << >> endobj\ntrailer\n%%EOF\n";
+    CODEX_TOOL_REGISTRY registry(
+            [&fixture]() { return fixture.Root(); }, {}, {}, {}, {}, {}, {}, {}, {},
+            [&]( const std::string& aKind, const wxFileName& aInput,
+                 const wxFileName& aOutput, const std::string& aLayers, std::string& )
+            {
+                kinds.push_back( aKind );
+                layers.push_back( aLayers );
+                BOOST_CHECK( aInput.FileExists() );
+                BOOST_CHECK( wxFileName::DirExists( aOutput.GetPath() ) );
+                wxFile file( aOutput.GetFullPath(), wxFile::write );
+                return file.IsOpened() && file.Write( pdfBody.data(), pdfBody.size() )
+                                                  == pdfBody.size();
+            } );
+
+    // Schematic: default destination, full hierarchy, no layer argument.
+    JSON schematic = registry.Handle(
+            "inspect", { { "operation", "pdf" }, { "path", "design.kicad_sch" } } );
+    BOOST_REQUIRE_MESSAGE( schematic.at( "success" ).get<bool>(), schematic.dump() );
+    JSON data = envelope( schematic )["data"];
+    BOOST_CHECK_EQUAL( data["kind"].get<std::string>(), "schematic" );
+    BOOST_CHECK_EQUAL( data["outputPath"].get<std::string>(), "documentation/design.pdf" );
+    BOOST_CHECK_EQUAL( data["outputBytes"].get<size_t>(), pdfBody.size() );
+    BOOST_CHECK_EQUAL( data["sha256"].get<std::string>().size(), 64 );
+    BOOST_CHECK( !data.contains( "layers" ) );
+    BOOST_CHECK( wxFileName::FileExists( fixture.Root() + wxS( "/documentation/design.pdf" ) ) );
+    BOOST_REQUIRE_EQUAL( kinds.size(), 1 );
+    BOOST_CHECK_EQUAL( layers[0], "" );
+
+    // Board: explicit nested destination and explicit layer list, both echoed back.
+    JSON board = registry.Handle(
+            "inspect", { { "operation", "pdf" }, { "path", "design.kicad_pcb" },
+                           { "output", "docs/rev-a/board.pdf" },
+                           { "layers", "F.Cu,Edge.Cuts" } } );
+    BOOST_REQUIRE_MESSAGE( board.at( "success" ).get<bool>(), board.dump() );
+    data = envelope( board )["data"];
+    BOOST_CHECK_EQUAL( data["kind"].get<std::string>(), "pcb" );
+    BOOST_CHECK_EQUAL( data["outputPath"].get<std::string>(), "docs/rev-a/board.pdf" );
+    BOOST_CHECK_EQUAL( data["layers"].get<std::string>(), "F.Cu,Edge.Cuts" );
+    BOOST_REQUIRE_EQUAL( kinds.size(), 2 );
+    BOOST_CHECK_EQUAL( kinds[1], "pcb" );
+    BOOST_CHECK_EQUAL( layers[1], "F.Cu,Edge.Cuts" );
+
+    // Board default layers are the documentation set.
+    JSON defaults = registry.Handle(
+            "inspect", { { "operation", "pdf" }, { "path", "design.kicad_pcb" } } );
+    BOOST_REQUIRE_MESSAGE( defaults.at( "success" ).get<bool>(), defaults.dump() );
+    BOOST_CHECK_EQUAL( envelope( defaults )["data"]["outputPath"].get<std::string>(),
+                       "documentation/design-board.pdf" );
+    BOOST_REQUIRE_EQUAL( layers.size(), 3 );
+    BOOST_CHECK_EQUAL( layers[2], "F.Cu,B.Cu,F.SilkS,B.SilkS,F.Mask,B.Mask,F.Fab,B.Fab,Edge.Cuts" );
+
+    // Rejections never reach the native runner.
+    const std::vector<std::pair<JSON, std::string>> rejected = {
+        { { { "operation", "pdf" }, { "path", "design.kicad_sch" },
+            { "layers", "F.Cu" } }, "invalid_arguments" },
+        { { { "operation", "pdf" }, { "path", "design.kicad_pcb" },
+            { "layers", "F.Cu;rm" } }, "invalid_arguments" },
+        { { { "operation", "pdf" }, { "path", "design.kicad_pcb" },
+            { "output", "../escape.pdf" } }, "invalid_path" },
+        { { { "operation", "pdf" }, { "path", "design.kicad_pcb" },
+            { "output", "design.kicad_pcb" } }, "invalid_path" },
+        { { { "operation", "pdf" }, { "path", "design.kicad_pcb" },
+            { "output", "design.kicad_pro" } }, "invalid_path" },
+    };
+
+    for( const auto& [arguments, code] : rejected )
+    {
+        JSON result = registry.Handle( "inspect", arguments );
+        BOOST_CHECK_MESSAGE( !result.at( "success" ).get<bool>(), arguments.dump() );
+        BOOST_CHECK_EQUAL( envelope( result )["error"]["code"].get<std::string>(), code );
+    }
+
+    // An existing non-PDF file at a .pdf name is never overwritten.
+    {
+        wxFFile decoy( wxFileName( fixture.Root(), wxS( "decoy.pdf" ) ).GetFullPath(),
+                       wxS( "wb" ) );
+        BOOST_REQUIRE( decoy.IsOpened() && decoy.Write( wxS( "not a pdf" ) ) );
+    }
+
+    JSON decoyResult = registry.Handle(
+            "inspect", { { "operation", "pdf" }, { "path", "design.kicad_pcb" },
+                           { "output", "decoy.pdf" } } );
+    BOOST_CHECK( !decoyResult.at( "success" ).get<bool>() );
+    BOOST_CHECK_EQUAL( envelope( decoyResult )["error"]["code"].get<std::string>(),
+                       "invalid_path" );
+    BOOST_CHECK_EQUAL( kinds.size(), 3 );
 }
 
 
@@ -386,6 +484,334 @@ BOOST_AUTO_TEST_CASE( RendersRealNativePreviewsWhenRequested )
                 std::filesystem::path( fixture.Root().ToStdString() )
                 / data["previewPath"].get<std::string>();
         BOOST_CHECK( wxFileExists( wxString::FromUTF8( previewPath.string() ) ) );
+
+        wxString keep;
+
+        if( wxGetEnv( wxS( "KICHAD_QA_PREVIEW_DIR" ), &keep ) && !keep.IsEmpty() )
+        {
+            wxCopyFile( wxString::FromUTF8( previewPath.string() ),
+                        keep + wxS( "/preview-" ) + request.second + wxS( ".png" ), true );
+        }
+    }
+}
+
+
+BOOST_AUTO_TEST_CASE( RendersBlockDiagramsToProjectPdfNatively )
+{
+    TOOL_PROJECT_FIXTURE fixture;
+    CODEX_TOOL_REGISTRY  registry( [&fixture]() { return fixture.Root(); } );
+    const std::string    source =
+            "flowchart TB\n"
+            "    CAM[\"1080p30 image sensor + lens<br/>Exact sensor TBD\"] -->|\"2-lane MIPI CSI-2\"| MPU\n"
+            "    subgraph SOM [\"Compute module\"]\n"
+            "        MPU[\"STM32MP25 running Linux\"]\n"
+            "        RAM[(\"1 GiB DDR\")] --- MPU\n"
+            "        FLASH[(\"8 GB eMMC\")] --- MPU\n"
+            "    end\n"
+            "    MPU -- SDIO --> WIFI{{\"Dual-band Wi-Fi\"}}\n"
+            "    WIFI -.-> ANT((Antenna))\n"
+            "    ANT ==> AP[External access point]\n"
+            "    classDef done fill:#c8e6c9,stroke:#2e7d32\n"
+            "    class MPU,FLASH done\n";
+
+    JSON rendered = registry.Handle(
+            "diagram", { { "operation", "render" }, { "name", "camera-block-diagram" },
+                           { "source", source }, { "title", "Camera block diagram" },
+                           { "preview", false } } );
+    BOOST_REQUIRE_MESSAGE( rendered.at( "success" ).get<bool>(), rendered.dump() );
+    JSON data = envelope( rendered )["data"];
+    BOOST_CHECK_EQUAL( data["outputPath"].get<std::string>(),
+                       "documentation/camera-block-diagram.pdf" );
+    BOOST_CHECK_EQUAL( data["sourcePath"].get<std::string>(),
+                       "documentation/camera-block-diagram.mmd" );
+    BOOST_CHECK_EQUAL( data["nodes"].get<int>(), 7 );
+    BOOST_CHECK_EQUAL( data["links"].get<int>(), 6 );
+    BOOST_CHECK_EQUAL( data["subgraphs"].get<int>(), 1 );
+    BOOST_CHECK_GT( data["outputBytes"].get<int64_t>(), 2048 );
+    BOOST_CHECK( !data["previewAttached"].get<bool>() );
+    BOOST_CHECK_EQUAL( rendered["contentItems"].size(), 1 );
+
+    const wxString pdfPath = fixture.Root() + wxS( "/documentation/camera-block-diagram.pdf" );
+    BOOST_REQUIRE( wxFileName::FileExists( pdfPath ) );
+    wxFile pdf( pdfPath, wxFile::read );
+    std::string bytes( static_cast<size_t>( pdf.Length() ), '\0' );
+    BOOST_REQUIRE_EQUAL( pdf.Read( bytes.data(), bytes.size() ),
+                         static_cast<wxFileOffset>( bytes.size() ) );
+    BOOST_CHECK( bytes.starts_with( "%PDF-" ) );
+    BOOST_CHECK_NE( bytes.find( "%%EOF" ), std::string::npos );
+    BOOST_CHECK_NE( bytes.find( "/Title" ), std::string::npos );
+
+    wxFFile mmd( fixture.Root() + wxS( "/documentation/camera-block-diagram.mmd" ), wxS( "rb" ) );
+    wxString saved;
+    BOOST_REQUIRE( mmd.IsOpened() && mmd.ReadAll( &saved ) );
+    BOOST_CHECK_EQUAL( saved.ToStdString(), source );
+
+    // Rerendering with a preview attaches a PNG when the rasterizer is available and never
+    // fails the render when it is not.
+    JSON again = registry.Handle(
+            "diagram", { { "operation", "render" }, { "name", "camera-block-diagram" },
+                           { "source", source } } );
+    BOOST_REQUIRE_MESSAGE( again.at( "success" ).get<bool>(), again.dump() );
+    data = envelope( again )["data"];
+
+    if( data["previewAttached"].get<bool>() )
+    {
+        BOOST_REQUIRE_EQUAL( again["contentItems"].size(), 2 );
+        BOOST_CHECK( again["contentItems"][1]["imageUrl"].get<std::string>()
+                             .starts_with( "data:image/png;base64," ) );
+        BOOST_CHECK( wxFileName::FileExists(
+                fixture.Root() + wxS( "/.kichad/previews/diagram-camera-block-diagram.png" ) ) );
+    }
+    else
+    {
+        BOOST_CHECK( data.contains( "previewError" ) );
+    }
+
+    // Rejections.
+    JSON bad = registry.Handle(
+            "diagram", { { "operation", "render" }, { "name", "broken" },
+                           { "source", "flowchart TB\n  A --> \n" } } );
+    BOOST_CHECK( !bad.at( "success" ).get<bool>() );
+    BOOST_CHECK_EQUAL( envelope( bad )["error"]["code"].get<std::string>(), "invalid_source" );
+
+    JSON escape = registry.Handle(
+            "diagram", { { "operation", "render" }, { "name", "escape" },
+                           { "source", "flowchart LR\n A --> B\n" },
+                           { "output", "../escape.pdf" } } );
+    BOOST_CHECK( !escape.at( "success" ).get<bool>() );
+    BOOST_CHECK_EQUAL( envelope( escape )["error"]["code"].get<std::string>(), "invalid_path" );
+
+    JSON badName = registry.Handle(
+            "diagram", { { "operation", "render" }, { "name", "../x" },
+                           { "source", "flowchart LR\n A --> B\n" } } );
+    BOOST_CHECK( !badName.at( "success" ).get<bool>() );
+    BOOST_CHECK_EQUAL( envelope( badName )["error"]["code"].get<std::string>(),
+                       "invalid_arguments" );
+}
+
+
+BOOST_AUTO_TEST_CASE( ReadsSearchesRendersAndImportsProjectPdfDocuments )
+{
+    TOOL_PROJECT_FIXTURE fixture;
+    CODEX_TOOL_REGISTRY  registry( [&fixture]() { return fixture.Root(); } );
+
+    // Make a real, text-searchable PDF with the native diagram renderer.
+    JSON rendered = registry.Handle(
+            "diagram", { { "operation", "render" }, { "name", "fixture" },
+                           { "source", "flowchart TB\n A[Regulator input] --> B[Pinout table]\n"
+                                       " B --> C[Absolute maximum ratings]\n" },
+                           { "preview", false } } );
+    BOOST_REQUIRE_MESSAGE( rendered.at( "success" ).get<bool>(), rendered.dump() );
+
+
+    JSON listed = registry.Handle( "document", { { "operation", "list" } } );
+    BOOST_REQUIRE_MESSAGE( listed.at( "success" ).get<bool>(), listed.dump() );
+    JSON data = envelope( listed )["data"];
+    BOOST_REQUIRE_EQUAL( data["documents"].size(), 1 );
+    BOOST_CHECK_EQUAL( data["documents"][0]["path"].get<std::string>(),
+                       "documentation/fixture.pdf" );
+    BOOST_CHECK( data["documents"][0]["pdf"].get<bool>() );
+
+    // Import from an absolute path below the home directory (the fixture lives in the temp
+    // directory, so import it via the project-relative form and via its absolute path when
+    // that path is inside the project).
+    const wxString absolute = fixture.Root() + wxS( "/documentation/fixture.pdf" );
+    JSON imported = registry.Handle(
+            "document", { { "operation", "import" }, { "source", absolute.ToStdString() },
+                            { "name", "regulator.pdf" } } );
+    BOOST_REQUIRE_MESSAGE( imported.at( "success" ).get<bool>(), imported.dump() );
+    data = envelope( imported )["data"];
+    BOOST_CHECK_EQUAL( data["path"].get<std::string>(), "datasheets/regulator.pdf" );
+    BOOST_CHECK_EQUAL( data["sha256"].get<std::string>().size(), 64 );
+    BOOST_CHECK( wxFileName::FileExists( fixture.Root() + wxS( "/datasheets/regulator.pdf" ) ) );
+
+    BOOST_CHECK_EQUAL( data["pages"].get<int>(), 1 );
+
+    JSON outside = registry.Handle(
+            "document", { { "operation", "import" }, { "source", "/etc/hosts" } } );
+    BOOST_CHECK( !outside.at( "success" ).get<bool>() );
+
+    JSON notPdf = registry.Handle(
+            "document", { { "operation", "import" },
+                            { "source", ( fixture.Root() + wxS( "/design.kicad_pcb" ) ).ToStdString() } } );
+    BOOST_CHECK( !notPdf.at( "success" ).get<bool>() );
+
+    JSON http = registry.Handle(
+            "document", { { "operation", "fetch" }, { "url", "http://example.invalid/a.pdf" } } );
+    BOOST_CHECK( !http.at( "success" ).get<bool>() );
+    BOOST_CHECK_EQUAL( envelope( http )["error"]["code"].get<std::string>(), "invalid_arguments" );
+
+    JSON escape = registry.Handle(
+            "document", { { "operation", "read" }, { "path", fixture.OutsideRelativePath().ToStdString() } } );
+    BOOST_CHECK( !escape.at( "success" ).get<bool>() );
+    BOOST_CHECK_EQUAL( envelope( escape )["error"]["code"].get<std::string>(), "invalid_path" );
+
+    JSON notDocument = registry.Handle(
+            "document", { { "operation", "read" }, { "path", "design.kicad_sch" } } );
+    BOOST_CHECK( !notDocument.at( "success" ).get<bool>() );
+
+    JSON read = registry.Handle(
+            "document", { { "operation", "read" }, { "path", "datasheets/regulator.pdf" },
+                            { "pages", "1" } } );
+
+    BOOST_REQUIRE_MESSAGE( read.at( "success" ).get<bool>(), read.dump() );
+    data = envelope( read )["data"];
+    BOOST_CHECK_EQUAL( data["pages"].get<int>(), 1 );
+    BOOST_CHECK_EQUAL( data["firstPage"].get<int>(), 1 );
+    BOOST_CHECK( data["text"].get<std::string>().starts_with( "=== page 1 ===" ) );
+    BOOST_CHECK_NE( data["text"].get<std::string>().find( "Absolute maximum ratings" ),
+                    std::string::npos );
+
+    JSON badRange = registry.Handle(
+            "document", { { "operation", "read" }, { "path", "datasheets/regulator.pdf" },
+                            { "pages", "3-9" } } );
+    BOOST_CHECK( !badRange.at( "success" ).get<bool>() );
+
+    JSON search = registry.Handle(
+            "document", { { "operation", "search" }, { "path", "datasheets/regulator.pdf" },
+                            { "query", "pinout TABLE" } } );
+    BOOST_REQUIRE_MESSAGE( search.at( "success" ).get<bool>(), search.dump() );
+    data = envelope( search )["data"];
+    BOOST_CHECK_EQUAL( data["totalMatches"].get<int>(), 1 );
+    BOOST_REQUIRE_EQUAL( data["matches"].size(), 1 );
+    BOOST_CHECK_EQUAL( data["matches"][0]["page"].get<int>(), 1 );
+    BOOST_CHECK_NE( data["matches"][0]["text"].get<std::string>().find( "Pinout table" ),
+                    std::string::npos );
+
+    JSON page = registry.Handle(
+            "document", { { "operation", "render" }, { "path", "datasheets/regulator.pdf" },
+                            { "page", 1 } } );
+
+    if( page.at( "success" ).get<bool>() )
+    {
+        BOOST_REQUIRE_EQUAL( page["contentItems"].size(), 2 );
+        BOOST_CHECK( page["contentItems"][1]["imageUrl"].get<std::string>()
+                             .starts_with( "data:image/png;base64," ) );
+    }
+
+    else
+    {
+        BOOST_CHECK_EQUAL( envelope( page )["error"]["code"].get<std::string>(),
+                           "dependency_unavailable" );
+    }
+
+    JSON badPage = registry.Handle(
+            "document", { { "operation", "render" }, { "path", "datasheets/regulator.pdf" },
+                            { "page", 2 } } );
+    BOOST_CHECK( !badPage.at( "success" ).get<bool>() );
+
+    // A truncated fragment is diagnosed as such rather than reported as a tool failure.
+    {
+        wxFFile fragment( fixture.Root() + wxS( "/datasheets/fragment.pdf" ), wxS( "wb" ) );
+        BOOST_REQUIRE( fragment.IsOpened()
+                       && fragment.Write( wxS( "%PDF-1.7\n1 0 obj\n<</Length 5>>\nstream\nhello\nendstream\nendobj\n" ) ) );
+    }
+
+    JSON fragment = registry.Handle(
+            "document", { { "operation", "read" }, { "path", "datasheets/fragment.pdf" } } );
+    BOOST_CHECK( !fragment.at( "success" ).get<bool>() );
+    BOOST_CHECK_EQUAL( envelope( fragment )["error"]["code"].get<std::string>(), "invalid_source" );
+    BOOST_CHECK_NE( envelope( fragment )["error"]["message"].get<std::string>().find( "fragment" ),
+                    std::string::npos );
+}
+
+
+BOOST_AUTO_TEST_CASE( FetchesRealDatasheetsWhenRequested )
+{
+    wxString url;
+
+    if( !wxGetEnv( wxS( "KICHAD_QA_FETCH_URL" ), &url ) || url.IsEmpty() )
+    {
+        BOOST_TEST_MESSAGE( "Skipping opt-in network datasheet fetch" );
+        return;
+    }
+
+    TOOL_PROJECT_FIXTURE fixture;
+    CODEX_TOOL_REGISTRY  registry( [&fixture]() { return fixture.Root(); } );
+    JSON fetched = registry.Handle(
+            "document", { { "operation", "fetch" }, { "url", url.ToStdString() },
+                            { "name", "fetched.pdf" } } );
+    BOOST_REQUIRE_MESSAGE( fetched.at( "success" ).get<bool>(), fetched.dump() );
+    JSON data = envelope( fetched )["data"];
+    BOOST_CHECK_EQUAL( data["path"].get<std::string>(), "datasheets/fetched.pdf" );
+    BOOST_CHECK_GT( data["bytes"].get<int64_t>(), 1024 );
+
+    JSON search = registry.Handle(
+            "document", { { "operation", "search" }, { "path", "datasheets/fetched.pdf" },
+                            { "query", "pdf" }, { "limit", 3 } } );
+    BOOST_REQUIRE_MESSAGE( search.at( "success" ).get<bool>(), search.dump() );
+    BOOST_CHECK_GT( envelope( search )["data"]["totalMatches"].get<int>(), 0 );
+    BOOST_TEST_MESSAGE( "fetched: " + data.dump() );
+
+    wxString importPath;
+
+    if( wxGetEnv( wxS( "KICHAD_QA_IMPORT_PATH" ), &importPath ) && !importPath.IsEmpty() )
+    {
+        JSON imported = registry.Handle(
+                "document", { { "operation", "import" }, { "source", importPath.ToStdString() } } );
+        BOOST_REQUIRE_MESSAGE( imported.at( "success" ).get<bool>(), imported.dump() );
+        BOOST_TEST_MESSAGE( "imported: " + envelope( imported )["data"].dump() );
+        JSON read = registry.Handle(
+                "document", { { "operation", "read" },
+                                { "path", envelope( imported )["data"]["path"].get<std::string>() },
+                                { "pages", "1-2" } } );
+        BOOST_REQUIRE_MESSAGE( read.at( "success" ).get<bool>(), read.dump() );
+        BOOST_TEST_MESSAGE( envelope( read )["data"]["text"].get<std::string>().substr( 0, 600 ) );
+    }
+}
+
+
+BOOST_AUTO_TEST_CASE( WritesRealNativePdfDocumentsWhenRequested )
+{
+    wxString enabled;
+
+    if( !wxGetEnv( wxS( "KICHAD_QA_NATIVE_PREVIEW" ), &enabled ) || enabled != wxS( "1" ) )
+    {
+        BOOST_TEST_MESSAGE( "Skipping opt-in native PDF integration" );
+        return;
+    }
+
+    TOOL_PROJECT_FIXTURE fixture;
+    const std::filesystem::path sourceRoot =
+            std::filesystem::path( __FILE__ ).parent_path().parent_path().parent_path()
+            / "data/kichad/fabrication_clean";
+    const std::pair<const char*, const char*> files[] = {
+        { "fabrication_clean.kicad_pro", "document.kicad_pro" },
+        { "fabrication_clean.kicad_sch", "document.kicad_sch" },
+        { "fabrication_clean.kicad_pcb", "document.kicad_pcb" }
+    };
+
+    for( const auto& [source, destination] : files )
+    {
+        std::error_code error;
+        std::filesystem::copy_file(
+                sourceRoot / source,
+                std::filesystem::path( fixture.Root().ToStdString() ) / destination,
+                std::filesystem::copy_options::overwrite_existing, error );
+        BOOST_REQUIRE_MESSAGE( !error, error.message() );
+    }
+
+    wxFileName config = wxFileName::DirName( fixture.Root() );
+    config.AppendDir( wxS( "config" ) );
+    BOOST_REQUIRE( wxFileName::Mkdir( config.GetFullPath(), wxS_DIR_DEFAULT,
+                                     wxPATH_MKDIR_FULL ) );
+    SCOPED_ENVIRONMENT isolatedConfig( wxS( "KICAD_CONFIG_HOME" ),
+                                       config.GetFullPath() );
+    CODEX_TOOL_REGISTRY registry( [&fixture]() { return fixture.Root(); } );
+
+    for( const std::pair<const char*, const char*> request : {
+                 std::pair{ "document.kicad_sch", "documentation/document.pdf" },
+                 std::pair{ "document.kicad_pcb", "documentation/document-board.pdf" } } )
+    {
+        JSON written = registry.Handle(
+                "inspect", { { "operation", "pdf" }, { "path", request.first } } );
+        BOOST_REQUIRE_MESSAGE( written.at( "success" ).get<bool>(), written.dump() );
+        const JSON data = envelope( written )["data"];
+        BOOST_CHECK_EQUAL( data["outputPath"].get<std::string>(), request.second );
+        BOOST_CHECK_GT( data["outputBytes"].get<int64_t>(), 1024 );
+        const std::filesystem::path outputPath =
+                std::filesystem::path( fixture.Root().ToStdString() ) / request.second;
+        BOOST_CHECK( wxFileExists( wxString::FromUTF8( outputPath.string() ) ) );
     }
 }
 

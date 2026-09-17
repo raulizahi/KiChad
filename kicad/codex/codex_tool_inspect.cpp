@@ -18,6 +18,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -36,6 +37,32 @@ constexpr size_t       MAX_EXPRESSION_BYTES = 32 * 1024;
 constexpr size_t       MAX_RESULT_BYTES = 256 * 1024;
 constexpr size_t       MAX_DISTINCT_HEADS = 512;
 constexpr wxFileOffset MAX_INLINE_PREVIEW_BYTES = 8 * 1024 * 1024;
+constexpr wxFileOffset MAX_PDF_DOCUMENT_BYTES = 256 * 1024 * 1024;
+constexpr size_t       MAX_PDF_LAYER_SPEC_BYTES = 1024;
+
+const char* const DEFAULT_BOARD_PDF_LAYERS =
+        "F.Cu,B.Cu,F.SilkS,B.SilkS,F.Mask,B.Mask,F.Fab,B.Fab,Edge.Cuts";
+
+
+bool validPdfLayerSpec( const std::string& aLayers )
+{
+    if( aLayers.empty() || aLayers.size() > MAX_PDF_LAYER_SPEC_BYTES )
+        return false;
+
+    // A conservative charset: KiCad layer names plus the comma separator.  Anything else
+    // is rejected before it reaches the CLI argument vector.
+    for( const char c : aLayers )
+    {
+        const bool ok = ( c >= 'A' && c <= 'Z' ) || ( c >= 'a' && c <= 'z' )
+                        || ( c >= '0' && c <= '9' ) || c == '.' || c == '_' || c == ','
+                        || c == '-' || c == ' ';
+
+        if( !ok )
+            return false;
+    }
+
+    return true;
+}
 
 } // namespace
 
@@ -50,7 +77,7 @@ nlohmann::json InspectSpec()
                               { "required", nlohmann::json::array( { "operation", "path" } ) } };
     schema["properties"]["operation"] =
             { { "type", "string" },
-              { "enum", nlohmann::json::array( { "summary", "find", "render" } ) } };
+              { "enum", nlohmann::json::array( { "summary", "find", "render", "pdf" } ) } };
     schema["properties"]["path"] =
             { { "type", "string" }, { "maxLength", 4096 },
               { "description", "Project-relative KiCad design file path." } };
@@ -68,14 +95,27 @@ nlohmann::json InspectSpec()
     schema["properties"]["page"] =
             { { "type", "integer" }, { "minimum", 1 }, { "maximum", 1000 },
               { "description", "One-based schematic page; defaults to 1." } };
+    schema["properties"]["output"] =
+            { { "type", "string" }, { "maxLength", 4096 },
+              { "description",
+                "Project-relative .pdf destination for operation 'pdf'; defaults to "
+                "documentation/<stem>.pdf for a schematic and "
+                "documentation/<stem>-board.pdf for a board." } };
+    schema["properties"]["layers"] =
+            { { "type", "string" }, { "maxLength", 1024 },
+              { "description",
+                "Comma-separated KiCad board layers for a board 'pdf', one page each; "
+                "defaults to " + std::string( DEFAULT_BOARD_PDF_LAYERS ) + "." } };
 
     return { { "type", "function" },
              { "name", "inspect" },
              { "description",
                "Inspect a KiCad 10 schematic, board, symbol library, or footprint without "
                "changing it. Use 'summary' for structural counts, 'find' for bounded raw "
-               "expressions, or 'render' to attach a native schematic, production-layer PCB, "
-               "assembly-layout PCB, or 3D PCB PNG directly to the model for visual review." },
+               "expressions, 'render' to attach a native schematic, production-layer PCB, "
+               "assembly-layout PCB, or 3D PCB PNG directly to the model for visual review, or "
+               "'pdf' to write a complete schematic hierarchy or multipage board layer PDF "
+               "document into the project for the user." },
              { "inputSchema", std::move( schema ) } };
 }
 
@@ -97,10 +137,11 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleInspect(
     const std::string operation = aArguments["operation"].get<std::string>();
     const std::string relativePath = aArguments["path"].get<std::string>();
 
-    if( operation != "summary" && operation != "find" && operation != "render" )
+    if( operation != "summary" && operation != "find" && operation != "render"
+        && operation != "pdf" )
     {
         return failure( "invalid_arguments",
-                        "inspect.operation must be 'summary', 'find', or 'render'" );
+                        "inspect.operation must be 'summary', 'find', 'render', or 'pdf'" );
     }
 
     wxString root = aProjectPath;
@@ -148,6 +189,117 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleInspect(
                      { "path", relativePath },
                      { "bytes", static_cast<uint64_t>( length ) },
                      { "rootHead", rootHead } };
+
+    if( operation == "pdf" )
+    {
+        const bool schematic = resolved.GetExt() == wxS( "kicad_sch" );
+        const bool board = resolved.GetExt() == wxS( "kicad_pcb" );
+
+        if( !schematic && !board )
+        {
+            return failure( "invalid_path",
+                            "inspect.pdf requires a .kicad_sch or .kicad_pcb file" );
+        }
+
+        std::string layers;
+
+        if( aArguments.contains( "layers" ) )
+        {
+            if( schematic )
+            {
+                return failure( "invalid_arguments",
+                                "inspect.layers applies only to a board PDF" );
+            }
+
+            if( !aArguments["layers"].is_string() )
+                return failure( "invalid_arguments", "inspect.layers must be a string" );
+
+            layers = aArguments["layers"].get<std::string>();
+
+            if( !validPdfLayerSpec( layers ) )
+            {
+                return failure( "invalid_arguments",
+                                "inspect.layers must be a comma-separated list of KiCad "
+                                "layer names" );
+            }
+        }
+        else if( board )
+        {
+            layers = DEFAULT_BOARD_PDF_LAYERS;
+        }
+
+        std::string outputRelative;
+
+        if( aArguments.contains( "output" ) )
+        {
+            if( !aArguments["output"].is_string() )
+                return failure( "invalid_arguments", "inspect.output must be a string" );
+
+            outputRelative = aArguments["output"].get<std::string>();
+        }
+        else
+        {
+            outputRelative = "documentation/" + resolved.GetName().ToStdString()
+                             + ( board ? "-board.pdf" : ".pdf" );
+        }
+
+        wxFileName output;
+        std::string outputResolved;
+
+        if( !KICHAD::CODEX_TOOLS::ResolveProjectPdfDestination( root, outputRelative, output,
+                                                                 outputResolved, pathError ) )
+        {
+            return failure( "invalid_path", pathError );
+        }
+
+        if( !output.DirExists()
+            && !wxFileName::Mkdir( output.GetPath(), 0755, wxPATH_MKDIR_FULL ) )
+        {
+            return failure( "pdf_failed", "could not create the PDF output directory" );
+        }
+
+        const std::string kind = schematic ? "schematic" : "pcb";
+        const bool written = m_nativePdfRunner
+                                     ? m_nativePdfRunner( kind, resolved, output, layers,
+                                                          pathError )
+                                     : KICHAD::CODEX_TOOLS::RunNativeKiCadPdf(
+                                               kind, resolved, output, layers, pathError );
+
+        if( !written )
+            return failure( "pdf_failed", pathError );
+
+        wxFile pdfFile( output.GetFullPath(), wxFile::read );
+        const wxFileOffset pdfBytes = pdfFile.IsOpened() ? pdfFile.Length() : wxInvalidOffset;
+
+        if( pdfBytes <= 0 || pdfBytes > MAX_PDF_DOCUMENT_BYTES )
+            return failure( "pdf_failed", "the PDF document must contain 1 byte through 256 MiB" );
+
+        std::string pdf( static_cast<size_t>( pdfBytes ), '\0' );
+
+        if( pdfFile.Read( pdf.data(), pdf.size() ) != pdfBytes )
+            return failure( "pdf_failed", "could not read back the complete PDF document" );
+
+        const size_t tail = std::min<size_t>( pdf.size(), 2048 );
+        const std::string_view prefix( pdf.data(), std::min<size_t>( pdf.size(), 8 ) );
+        const std::string_view suffix( pdf.data() + pdf.size() - tail, tail );
+
+        if( !prefix.starts_with( "%PDF-" ) || suffix.find( "%%EOF" ) == std::string_view::npos )
+        {
+            wxRemoveFile( output.GetFullPath() );
+            return failure( "pdf_failed",
+                            "the native export did not produce a well-formed PDF document" );
+        }
+
+        payload["kind"] = kind;
+        payload["outputPath"] = outputResolved;
+        payload["outputBytes"] = static_cast<uint64_t>( pdfBytes );
+        payload["sha256"] = picosha2::hash256_hex_string( pdf );
+
+        if( board )
+            payload["layers"] = layers;
+
+        return success( payload );
+    }
 
     if( operation == "render" )
     {

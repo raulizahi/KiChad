@@ -85,7 +85,20 @@ or compiled defaults.
 The read-only `inspect.render` operation plots current schematic and 2D board views through the
 matching `kicad-cli`, renders a native 3D board view when requested, crops blank plot margins, and
 attaches the resulting PNG directly to the Codex tool response. Preview files live only under the
-project's derived `.kichad/previews/` directory. A committed `design.apply` saves the live board and
+project's derived `.kichad/previews/` directory. The `inspect.pdf` operation writes a user-facing
+schematic or multipage board PDF into the project (`documentation/<stem>.pdf` and
+`documentation/<stem>-board.pdf` by default, or a project-confined `output` path) without the
+fabrication gates; the gated `fabricate` outputs remain the documents of record. The `diagram`
+tool renders block diagrams natively: Mermaid flowchart source in, a plotted PDF (via KiCad's own
+PDF plotter, no browser or Node runtime) plus the saved `.mmd` source in `documentation/` out,
+with a PNG preview attached for the agent's review. The `document` tool is the reverse direction:
+the agent fetches https datasheets or imports PDFs the user names by absolute path into
+`datasheets/`, then reads page ranges and searches all pages with KiChad's own PDF text reader (no
+poppler or other external software; damaged cross-reference tables are tolerated). The embedded
+agent has no shell or attachments, so this is its only access to PDF content. Rendering a datasheet
+page as an image is the one optional extra: it needs poppler's `pdftoppm`, looked up on `PATH`,
+next to the application, `KICHAD_TOOL_PATH`, and the usual package-manager prefixes. Schematic,
+board, and diagram previews rasterize SVG in-process, so `kicad-cli` is the only required helper. A committed `design.apply` saves the live board and
 returns `verification.status = not_run`; the embedded agent must inspect the rendered result and run
 ERC/DRC before it can describe a design as correct.
 

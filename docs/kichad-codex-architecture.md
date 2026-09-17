@@ -37,12 +37,48 @@ The panel's **Revert turn** action closes open editors through the normal KiCad 
 that exact pre-turn state.  If a snapshot cannot be established, mutating native tools stay locked;
 read-only conversation and inspection can continue.
 
-The six advertised native tools are `project`, `inspect`, `design`, `pcb`, `verify`, and `fabricate`.
+The eight advertised native tools are `project`, `inspect`, `design`, `pcb`, `verify`, `fabricate`,
+`diagram`, and `document`.
 `project` reports the active design context and snapshot gate.  `inspect` parses KiCad 10 schematic,
 board, symbol, and footprint s-expressions in-process and returns structural summaries or bounded
 matching expressions.
 It accepts only existing project-relative paths, resolves symlinks before enforcing the project
-root, checks the file extension against the document root, caps input/output sizes, and never writes.
+root, checks the file extension against the document root, and caps input/output sizes.  Its only
+writes are derived artifacts: `render` previews under `.kichad/previews/`, and `pdf` documents.
+`inspect.pdf` plots a complete schematic hierarchy (drawing sheet and colours retained, property
+popups excluded) or a multipage board layer set through the sibling `kicad-cli` into a
+project-confined `.pdf` destination, defaulting to `documentation/<stem>.pdf` and
+`documentation/<stem>-board.pdf`.  The destination must end in `.pdf`, may only replace a file
+that already carries a PDF signature, and is validated for a PDF header and trailer before its
+size and SHA-256 are reported.  It has no fabrication gates; the fabrication package's
+`schematic_pdf` and `pdf` outputs remain the gated documents of record.
+`diagram` renders block and architecture diagrams natively: the agent supplies Mermaid flowchart
+source (directions, every standard node shape, labelled solid/dotted/thick links, chains, `&`
+fan-out, nested subgraphs, `classDef`/`class`/`:::`/`style` colours) and KiChad parses it
+in-process, runs a deterministic layered layout (cycle-tolerant longest-path ranking, barycenter
+ordering, one band per top-level subgraph so boxes never overlap foreign nodes), and plots a
+single custom-sized PDF page through KiCad's own `PDF_PLOTTER`.  No browser, Node runtime, or
+Mermaid renderer is involved.  The PDF lands at a project-confined `.pdf` destination
+(`documentation/<name>.pdf` by default) with the Mermaid text saved beside it as `<stem>.mmd`,
+and the response attaches a `pdftoppm` PNG preview when that rasterizer is available so the
+agent can review the drawing it produced.
+`document` is the agent's only route to PDF content, because the owned Codex process has no shell,
+no file tool, and no chat attachments.  Reading is native: `pdf_text_document.cpp` indexes objects
+by scanning for `N G obj` (so damaged cross-reference tables still open), decodes Flate, LZW,
+ASCIIHex, ASCII85 and RunLength streams with predictors, expands object streams, walks the page
+tree, and interprets content streams with the text matrix, font widths, ToUnicode CMaps and
+simple-font encodings before assembling glyph runs into column-preserving lines.  `fetch` downloads an `https` PDF (64 MiB cap, redirects
+followed, signature checked) into the project's `datasheets/` directory through KiCad's libcurl
+wrapper, `import` copies a PDF the user named by absolute path (honoured only below the user's home
+directory or inside the project) into the same place, `list` enumerates project PDFs, `read`
+returns `pdftotext` layout text for a bounded page range with page markers, `search` reports
+case-insensitive matches with page numbers across every page, and `render` attaches one page as a
+PNG for pinout tables and figures; that one operation is optional and needs poppler's `pdftoppm`,
+reported as `dependency_unavailable` when absent.  Everything else runs in-process.
+
+Previews never need an external rasterizer either: `inspect.render` and the `diagram` preview plot
+SVG (through `kicad-cli` or KiCad's SVG plotter) and rasterize it in-process with the vendored
+nanosvg, so `kicad-cli` is the only executable KiChad depends on.
 `design` is the compiler front end for reusable `.kicad_kds` KiChad Design Script sidecars.  It
 describes the versioned language, reads the exact bounded source as model context, compiles either
 inline source or a project-confined sidecar into a private deterministic validated IR and pass plan,

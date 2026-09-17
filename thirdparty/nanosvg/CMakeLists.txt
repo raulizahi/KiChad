@@ -1,5 +1,6 @@
 set(NANOSVG_SRCS
     nanosvg.cpp
+    nanosvgrast.cpp
     )
 
 add_library(nanosvg STATIC ${NANOSVG_SRCS})

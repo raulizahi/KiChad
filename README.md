@@ -73,10 +73,27 @@ project context and bounded, read-only KiCad 10 design inspection without shell 
 PCB (`pcb2d`), assembly/layout PCB (`pcblayout`, including Fab fields and courtyards), or 3D board
 PNG directly to the Codex tool result, so the model can review actual generated documents
 while iterating; these images are derived previews under `.kichad/previews/`, not another design
-representation. KDS `place` declarations can independently control each footprint Reference and
+representation. Previews are plotted as SVG and rasterized in-process, so `kicad-cli` is the only
+executable KiChad needs. `inspect.pdf` writes a complete schematic hierarchy or a multipage board
+layer PDF into the project (`documentation/<stem>.pdf` by default) for the user, without the
+fabrication gates. KDS `place` declarations can independently control each footprint Reference and
 Value field's visibility, absolute position, presentation layer, size, stroke, angle,
-justification, and font styling. The Ubuntu bootstrap installs Poppler for the bounded PDF-to-PNG
-stage. The
+justification, and font styling.
+
+Two document tools round out the agent's surface. `diagram` renders block and architecture diagrams
+natively: the agent supplies Mermaid flowchart source (directions, every standard node shape,
+labelled solid/dotted/thick links, chains, `&` fan-out, nested subgraphs, class and style colours)
+and KiChad lays it out and plots a PDF with its own plotter, saving the `.mmd` source beside it and
+attaching a PNG preview, so block diagrams arrive as project documents instead of Mermaid text to
+render elsewhere. `document` is the agent's route to PDF datasheets, because the owned Codex process
+has no shell, no file tool, and no chat attachments: `import` copies a PDF the user names by absolute
+path (below the home directory) into `datasheets/`, `fetch` downloads an https PDF up to 64 MiB,
+`read` returns page-range text, `search` reports matches with page numbers, and `list` enumerates
+project PDFs. Reading is native: KiChad's own bounded PDF text reader tolerates damaged
+cross-reference tables, decodes the standard stream filters and object streams, and recovers text
+through ToUnicode maps and font encodings while keeping table columns aligned. Rendering a
+datasheet page as an image (`document.render`) is the one optional extra that needs Poppler's
+`pdftoppm`; everything else runs in-process. The
 `design` call returns bounded paged semantic context, reads exact source, compiles, previews,
 atomically saves, and transactionally
 applies reusable `.kicad_kds` project sidecars, and the `pcb` call exposes the exact protobuf field

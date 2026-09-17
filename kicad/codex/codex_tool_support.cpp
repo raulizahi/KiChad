@@ -11,6 +11,7 @@
 
 #include "kichad_protobuf_compat.h"
 #include "codex_tool_internal.h"
+#include "svg_raster.h"
 #include "board_render_artifact_validator.h"
 #include "board_ps_artifact_validator.h"
 #include "design_script_compiler.h"
@@ -74,6 +75,7 @@
 #include <wx/filename.h>
 #include <wx/image.h>
 #include <wx/stdpaths.h>
+#include <wx/tokenzr.h>
 #include <wx/utils.h>
 #include <wx/wfstream.h>
 #include <wx/xml/xml.h>
@@ -1589,111 +1591,76 @@ bool runNativeFabricationCommand( const wxFileName& aCli,
 }
 
 
-bool runNativeKiCadPreview( const std::string& aView, const wxFileName& aInput,
-                            const wxFileName& aOutput, int aPage, std::string& aError )
+bool findExternalTool( const wxString& aName, wxFileName& aExecutable )
 {
-    wxFileName cli;
+    wxString searchPath;
+    wxString found;
 
-    if( !findNativeKiCadCli( cli ) )
+    if( wxGetEnv( wxS( "PATH" ), &searchPath ) && wxFindFileInPath( &found, searchPath, aName ) )
     {
-        aError = "the sibling kicad-cli preview backend is unavailable";
-        return false;
-    }
-
-    PRIVATE_TEMPORARY_DIRECTORY temporary;
-
-    if( !temporary.Create( "kichad-preview", aError ) )
-        return false;
-
-    wxFileName logs = wxFileName::DirName(
-            wxString::FromUTF8( temporary.Path().string() ) );
-
-    if( aOutput.FileExists() && !wxRemoveFile( aOutput.GetFullPath() ) )
-    {
-        aError = "could not replace the prior derived preview";
-        return false;
-    }
-
-    if( aView == "pcb3d" )
-    {
-        const std::vector<std::string> arguments = {
-            "pcb", "render", "--output", aOutput.GetFullPath().ToStdString(),
-            "--width", "1600", "--height", "1200", "--side", "top",
-            "--background", "opaque", "--quality", "high", "--preset",
-            "follow_plot_settings", aInput.GetFullPath().ToStdString()
-        };
-
-        if( !runNativeFabricationCommand( cli, arguments, logs, 0, "PCB preview", aError ) )
-            return false;
-
-        if( !aOutput.FileExists() )
-        {
-            aError = "native KiCad did not produce the requested PCB preview";
-            return false;
-        }
-
+        aExecutable = wxFileName( found );
         return true;
     }
 
-    wxFileName pdf( wxString::FromUTF8( temporary.Path().string() ),
-                    wxS( "preview.pdf" ) );
-    std::vector<std::string> arguments;
+    // GUI launches on macOS (and desktop launchers elsewhere) carry a minimal PATH that omits
+    // Homebrew, MacPorts, and /usr/local, so look where package managers actually install.
+    std::vector<wxString> candidates = {
+        wxFileName( wxStandardPaths::Get().GetExecutablePath() ).GetPath()
+    };
+    wxString extra;
 
-    if( aView == "schematic" )
+    if( wxGetEnv( wxS( "KICHAD_TOOL_PATH" ), &extra ) && !extra.IsEmpty() )
     {
-        arguments = { "sch", "export", "pdf", "--output",
-                      pdf.GetFullPath().ToStdString(), "--exclude-drawing-sheet",
-                      "--pages", std::to_string( aPage ),
-                      aInput.GetFullPath().ToStdString() };
+        for( const wxString& dir : wxSplit( extra, wxPATH_SEP[0] ) )
+            candidates.push_back( dir );
     }
-    else if( aView == "pcb2d" )
+
+    for( const char* dir : { "/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin",
+                             "/usr/bin", "/bin", "/snap/bin", "/usr/local/opt/poppler/bin",
+                             "/opt/homebrew/opt/poppler/bin" } )
+        candidates.push_back( wxString::FromUTF8( dir ) );
+
+    for( const wxString& dir : candidates )
     {
-        arguments = { "pcb", "export", "pdf", "--output",
-                      pdf.GetFullPath().ToStdString(), "--layers",
-                      "F.Cu,B.Cu,F.SilkS,B.SilkS,Edge.Cuts", "--mode-single",
-                      "--scale", "0", "--exclude-value", "--no-property-popups",
-                      aInput.GetFullPath().ToStdString() };
+        wxFileName candidate( dir, aName );
+#ifdef __WXMSW__
+        candidate.SetExt( wxS( "exe" ) );
+#endif
+
+        if( candidate.FileExists() && candidate.IsFileExecutable() )
+        {
+            aExecutable = candidate;
+            return true;
+        }
     }
-    else if( aView == "pcblayout" )
+
+    return false;
+}
+
+
+bool rasterizePdfToPng( const wxFileName& pdf, const wxFileName& logs,
+                        const wxFileName& aOutput, std::string& aError, int aPage = 1 )
+{
+    PRIVATE_TEMPORARY_DIRECTORY temporary;
+
+    if( !temporary.Create( "kichad-raster", aError ) )
+        return false;
+
+    wxFileName rasterizerPath;
+
+    if( !findExternalTool( wxS( "pdftoppm" ), rasterizerPath ) )
     {
-        arguments = { "pcb", "export", "pdf", "--output",
-                      pdf.GetFullPath().ToStdString(), "--layers",
-                      "F.Cu,B.Cu,F.SilkS,B.SilkS,F.Fab,B.Fab,F.CrtYd,B.CrtYd,Edge.Cuts",
-                      "--mode-single", "--scale", "0", "--no-property-popups",
-                      aInput.GetFullPath().ToStdString() };
-    }
-    else
-    {
-        aError = "unsupported native preview view";
+        aError = "the PDF-to-PNG preview rasterizer (poppler's pdftoppm) is not installed in "
+                 "PATH, /opt/homebrew/bin, /usr/local/bin, or KICHAD_TOOL_PATH";
         return false;
     }
 
-    if( !runNativeFabricationCommand( cli, arguments, logs, 0, aView + " preview", aError )
-        || !pdf.FileExists() )
-    {
-        if( aError.empty() )
-            aError = "native KiCad did not produce the preview PDF";
-
-        return false;
-    }
-
-    wxString executableSearchPath;
-    wxString rasterizer;
-
-    if( !wxGetEnv( wxS( "PATH" ), &executableSearchPath )
-        || !wxFindFileInPath( &rasterizer, executableSearchPath, wxS( "pdftoppm" ) ) )
-    {
-        aError = "the PDF-to-PNG preview rasterizer is unavailable";
-        return false;
-    }
-
-    wxFileName rasterizerPath( rasterizer );
     wxFileName prefix( wxString::FromUTF8( temporary.Path().string() ),
                        wxS( "rasterized" ) );
     prefix.ClearExt();
     const std::vector<std::string> rasterArguments = {
-        "-png", "-r", "160", "-singlefile", pdf.GetFullPath().ToStdString(),
-        prefix.GetFullPath().ToStdString()
+        "-png", "-r", "160", "-f", std::to_string( aPage ), "-l", std::to_string( aPage ),
+        "-singlefile", pdf.GetFullPath().ToStdString(), prefix.GetFullPath().ToStdString()
     };
 
     if( !runNativeFabricationCommand( rasterizerPath, rasterArguments, logs, 1,
@@ -1776,6 +1743,200 @@ bool runNativeKiCadPreview( const std::string& aView, const wxFileName& aInput,
         && !wxCopyFile( rasterized.GetFullPath(), aOutput.GetFullPath(), true ) )
     {
         aError = "preview rasterization did not produce a readable PNG";
+        return false;
+    }
+
+    return true;
+}
+
+
+bool runNativeKiCadPreview( const std::string& aView, const wxFileName& aInput,
+                            const wxFileName& aOutput, int aPage, std::string& aError )
+{
+    wxFileName cli;
+
+    if( !findNativeKiCadCli( cli ) )
+    {
+        aError = "the sibling kicad-cli preview backend is unavailable";
+        return false;
+    }
+
+    PRIVATE_TEMPORARY_DIRECTORY temporary;
+
+    if( !temporary.Create( "kichad-preview", aError ) )
+        return false;
+
+    wxFileName logs = wxFileName::DirName(
+            wxString::FromUTF8( temporary.Path().string() ) );
+
+    if( aOutput.FileExists() && !wxRemoveFile( aOutput.GetFullPath() ) )
+    {
+        aError = "could not replace the prior derived preview";
+        return false;
+    }
+
+    if( aView == "pcb3d" )
+    {
+        const std::vector<std::string> arguments = {
+            "pcb", "render", "--output", aOutput.GetFullPath().ToStdString(),
+            "--width", "1600", "--height", "1200", "--side", "top",
+            "--background", "opaque", "--quality", "high", "--preset",
+            "follow_plot_settings", aInput.GetFullPath().ToStdString()
+        };
+
+        if( !runNativeFabricationCommand( cli, arguments, logs, 0, "PCB preview", aError ) )
+            return false;
+
+        if( !aOutput.FileExists() )
+        {
+            aError = "native KiCad did not produce the requested PCB preview";
+            return false;
+        }
+
+        return true;
+    }
+
+    // 2D views: plot SVG with kicad-cli and rasterize it in-process, so no PDF rasterizer or
+    // other external tool is needed.
+    wxFileName svgDirectory = wxFileName::DirName(
+            wxString::FromUTF8( temporary.Path().string() ) );
+    svgDirectory.AppendDir( wxS( "svg" ) );
+
+    if( !wxFileName::Mkdir( svgDirectory.GetFullPath(), 0700, wxPATH_MKDIR_FULL ) )
+    {
+        aError = "could not create the preview staging directory";
+        return false;
+    }
+
+    wxFileName boardSvg( svgDirectory.GetFullPath(), wxS( "board.svg" ) );
+    std::vector<std::string> arguments;
+
+    if( aView == "schematic" )
+    {
+        arguments = { "sch", "export", "svg", "--output",
+                      svgDirectory.GetFullPath().ToStdString(), "--exclude-drawing-sheet",
+                      "--pages", std::to_string( aPage ),
+                      aInput.GetFullPath().ToStdString() };
+    }
+    else if( aView == "pcb2d" )
+    {
+        arguments = { "pcb", "export", "svg", "--output",
+                      boardSvg.GetFullPath().ToStdString(), "--layers",
+                      "F.Cu,B.Cu,F.SilkS,B.SilkS,Edge.Cuts", "--mode-single",
+                      "--page-size-mode", "2", "--exclude-drawing-sheet",
+                      aInput.GetFullPath().ToStdString() };
+    }
+    else if( aView == "pcblayout" )
+    {
+        arguments = { "pcb", "export", "svg", "--output",
+                      boardSvg.GetFullPath().ToStdString(), "--layers",
+                      "F.Cu,B.Cu,F.SilkS,B.SilkS,F.Fab,B.Fab,F.CrtYd,B.CrtYd,Edge.Cuts",
+                      "--mode-single", "--page-size-mode", "2", "--exclude-drawing-sheet",
+                      aInput.GetFullPath().ToStdString() };
+    }
+    else
+    {
+        aError = "unsupported native preview view";
+        return false;
+    }
+
+    if( !runNativeFabricationCommand( cli, arguments, logs, 0, aView + " preview", aError ) )
+        return false;
+
+    wxFileName svg = boardSvg;
+
+    if( aView == "schematic" )
+    {
+        // The schematic exporter names the file after the sheet; take the single SVG produced.
+        wxArrayString produced;
+        wxDir::GetAllFiles( svgDirectory.GetFullPath(), &produced, wxS( "*.svg" ), wxDIR_FILES );
+
+        if( produced.empty() )
+        {
+            aError = "native KiCad did not produce the schematic preview SVG";
+            return false;
+        }
+
+        produced.Sort();
+        svg = wxFileName( produced.front() );
+    }
+
+    if( !svg.FileExists() )
+    {
+        aError = "native KiCad did not produce the preview SVG";
+        return false;
+    }
+
+    return KICHAD::SVG_RASTER::RasterizeSvgFile( svg, aOutput, 2000, aError );
+}
+
+
+bool runNativeKiCadPdf( const std::string& aKind, const wxFileName& aInput,
+                        const wxFileName& aOutput, const std::string& aLayers,
+                        std::string& aError )
+{
+    wxFileName cli;
+
+    if( !findNativeKiCadCli( cli ) )
+    {
+        aError = "the sibling kicad-cli PDF backend is unavailable";
+        return false;
+    }
+
+    PRIVATE_TEMPORARY_DIRECTORY temporary;
+
+    if( !temporary.Create( "kichad-pdf", aError ) )
+        return false;
+
+    wxFileName logs = wxFileName::DirName(
+            wxString::FromUTF8( temporary.Path().string() ) );
+
+    // Plot into the private directory first so a failed or partial export never leaves a
+    // truncated document at the requested project path.
+    wxFileName staged( wxString::FromUTF8( temporary.Path().string() ),
+                       wxS( "document.pdf" ) );
+    std::vector<std::string> arguments;
+
+    if( aKind == "schematic" )
+    {
+        // Full hierarchy, drawing sheet and colours retained; property popups excluded so
+        // the document has no embedded scripted actions.
+        arguments = { "sch", "export", "pdf", "--output",
+                      staged.GetFullPath().ToStdString(),
+                      "--exclude-pdf-property-popups",
+                      aInput.GetFullPath().ToStdString() };
+    }
+    else if( aKind == "pcb" )
+    {
+        arguments = { "pcb", "export", "pdf", "--output",
+                      staged.GetFullPath().ToStdString(), "--layers", aLayers,
+                      "--mode-multipage", "--include-border-title", "--check-zones",
+                      "--no-property-popups", aInput.GetFullPath().ToStdString() };
+    }
+    else
+    {
+        aError = "unsupported native PDF document kind";
+        return false;
+    }
+
+    if( !runNativeFabricationCommand( cli, arguments, logs, 0, aKind + " PDF", aError )
+        || !staged.FileExists() )
+    {
+        if( aError.empty() )
+            aError = "native KiCad did not produce the requested PDF";
+
+        return false;
+    }
+
+    if( aOutput.FileExists() && !wxRemoveFile( aOutput.GetFullPath() ) )
+    {
+        aError = "could not replace the prior PDF document";
+        return false;
+    }
+
+    if( !wxCopyFile( staged.GetFullPath(), aOutput.GetFullPath(), true ) )
+    {
+        aError = "could not install the PDF document into the project";
         return false;
     }
 
@@ -7033,6 +7194,150 @@ bool KICHAD::CODEX_TOOLS::RunNativeKiCadPreview(
         const wxFileName& aOutput, int aPage, std::string& aError )
 {
     return runNativeKiCadPreview( aView, aInput, aOutput, aPage, aError );
+}
+
+
+/**
+ * Resolve a project-relative PDF destination that may not exist yet.  The deepest existing
+ * ancestor is canonicalized before the project-root check so a symlinked directory cannot
+ * redirect the document outside the project; the leaf must carry a .pdf extension so the tool
+ * can never overwrite a design source.
+ */
+bool KICHAD::CODEX_TOOLS::ResolveProjectPdfDestination( const wxString& aProjectPath, const std::string& aRelativePath,
+                            wxFileName& aResolved, std::string& aRelativeResolved,
+                            std::string& aError )
+{
+    wxString   relative = wxString::FromUTF8( aRelativePath );
+    wxFileName candidate( relative );
+
+    if( aRelativePath.empty() || aRelativePath.size() > 4096
+        || aRelativePath.find( '\0' ) != std::string::npos || candidate.IsAbsolute()
+        || candidate.GetFullName().IsEmpty() )
+    {
+        aError = "output must be a project-relative file path";
+        return false;
+    }
+
+    if( candidate.GetExt().Lower() != wxS( "pdf" ) )
+    {
+        aError = "output must end in .pdf";
+        return false;
+    }
+
+    wxFileName root = wxFileName::DirName( aProjectPath );
+    root.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+
+    if( !canonicalizeExisting( root, true ) )
+    {
+        aError = "active project path could not be resolved";
+        return false;
+    }
+
+    candidate.MakeAbsolute( root.GetFullPath() );
+    candidate.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+
+    // Walk up to the deepest existing ancestor and canonicalize it; the remaining
+    // components are created below it, so they cannot be symlinks yet.
+    wxFileName ancestor = wxFileName::DirName( candidate.GetPath() );
+    std::vector<wxString> pending;
+
+    while( ancestor.GetDirCount() > 0 && !ancestor.DirExists() )
+    {
+        pending.insert( pending.begin(), ancestor.GetDirs().Last() );
+        ancestor.RemoveLastDir();
+    }
+
+    if( !canonicalizeExisting( ancestor, true ) )
+    {
+        aError = "output directory could not be resolved";
+        return false;
+    }
+
+    wxString ancestorPath = ancestor.GetPathWithSep();
+    wxString rootPath = root.GetPathWithSep();
+
+#ifdef __WXMSW__
+    ancestorPath.MakeLower();
+    rootPath.MakeLower();
+#endif
+
+    if( !ancestorPath.StartsWith( rootPath ) )
+    {
+        aError = "output resolves outside the active project";
+        return false;
+    }
+
+    for( const wxString& dir : pending )
+        ancestor.AppendDir( dir );
+
+    wxFileName resolved( ancestor.GetPath(), candidate.GetFullName() );
+
+    if( resolved.FileExists() )
+    {
+        wxFile existing( resolved.GetFullPath(), wxFile::read );
+        char signature[5] = { 0 };
+
+        if( !existing.IsOpened() || existing.Read( signature, 5 ) != 5
+            || std::string_view( signature, 5 ) != "%PDF-" )
+        {
+            aError = "output already exists and is not a PDF document";
+            return false;
+        }
+    }
+
+    wxFileName relativeName( resolved );
+    relativeName.MakeRelativeTo( root.GetFullPath() );
+    aRelativeResolved = relativeName.GetFullPath( wxPATH_UNIX ).ToStdString();
+    aResolved = resolved;
+    return true;
+}
+
+
+
+
+bool KICHAD::CODEX_TOOLS::FindExternalTool( const wxString& aName, wxFileName& aExecutable )
+{
+    return findExternalTool( aName, aExecutable );
+}
+
+
+bool KICHAD::CODEX_TOOLS::RunExternalCommand( const wxFileName& aExecutable,
+                                              const std::vector<std::string>& aArguments,
+                                              const wxFileName& aLogDirectory, size_t aIndex,
+                                              const std::string& aKind, std::string& aError )
+{
+    return runNativeFabricationCommand( aExecutable, aArguments, aLogDirectory, aIndex, aKind,
+                                        aError );
+}
+
+
+bool KICHAD::CODEX_TOOLS::RasterizePdfPreview( const wxFileName& aPdf,
+                                               const wxFileName& aOutput,
+                                               std::string& aError, int aPage )
+{
+    PRIVATE_TEMPORARY_DIRECTORY temporary;
+
+    if( !temporary.Create( "kichad-raster-logs", aError ) )
+        return false;
+
+    wxFileName logs = wxFileName::DirName(
+            wxString::FromUTF8( temporary.Path().string() ) );
+
+    if( aOutput.FileExists() && !wxRemoveFile( aOutput.GetFullPath() ) )
+    {
+        aError = "could not replace the prior derived preview";
+        return false;
+    }
+
+    return rasterizePdfToPng( aPdf, logs, aOutput, aError, aPage );
+}
+
+
+bool KICHAD::CODEX_TOOLS::RunNativeKiCadPdf(
+        const std::string& aKind, const wxFileName& aInput, const wxFileName& aOutput,
+        const std::string& aLayers, std::string& aError )
+{
+    return runNativeKiCadPdf( aKind, aInput, aOutput, aLayers, aError );
 }
 
 
