@@ -170,8 +170,10 @@ nlohmann::json DesignSpec()
                 "For apply: when boardPath does not exist yet, create it as a new empty KiCad 10 "
                 "board first, e.g. a second board (sensor board beside the compute board) in the "
                 "same project. Name it after the KDS project so <name>.kicad_pcb pairs with the "
-                "KDS root sheet <name>.kicad_sch for DRC parity and fabrication. Boards in one "
-                "project share the project's design rules and netclasses." } };
+                "KDS root sheet <name>.kicad_sch for DRC parity and fabrication. KiCad keeps one "
+                "active project at a time: opening the second board switches to its own "
+                "<name>.kicad_pro (created on first open), so design rules and netclasses are "
+                "per board and the other board's editor closes meanwhile." } };
     schema["properties"]["expectedSha256"] =
             { { "type", "string" }, { "minLength", 64 }, { "maxLength", 64 },
               { "description",

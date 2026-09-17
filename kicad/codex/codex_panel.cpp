@@ -1243,6 +1243,16 @@ wxString CODEX_PANEL::projectPath() const
 
 void CODEX_PANEL::selectProjectThread()
 {
+    // KiCad unloads the active project before loading another one, and both steps notify us.
+    // While a board's own project is being swapped in (a second board of the same product,
+    // living in the same directory), the provider transiently reports no project at all;
+    // rebinding on that would discard the turn snapshot and lock every mutating tool for the
+    // rest of the turn.  Keep the current binding until a real directory is reported.
+    const wxString provided = m_projectPathProvider ? m_projectPathProvider() : wxString();
+
+    if( provided.IsEmpty() && !m_threadProjectPath.IsEmpty() )
+        return;
+
     wxString activePath = projectPath();
 
     if( activePath == m_threadProjectPath )
