@@ -9,7 +9,10 @@ upstream development branch are intentionally excluded.  The pinned version is r
 `.kichad-base-version`, and the build script verifies both the Git ancestry and resulting binary.
 
 See [KICHAD.md](KICHAD.md) for the Linux quick start, repository layout, runtime libraries, and
-upstream-sync workflow.  KiChad is an independent project and is not an official KiCad build.
+upstream-sync workflow.  Branches: `feature/common-os-features` carries the platform-neutral KiChad
+work and is what `latest` tracks; `feature/macos-port` adds the macOS preset and bundle tooling on
+top of it; `feature/windows-port` does the same for Windows.  Pull the port branch for your platform
+to get the newest improvements.  KiChad is an independent project and is not an official KiCad build.
 The consolidated [production status and roadmap](docs/production-status.md) records what is
 implemented, what has been qualified, the remaining production blockers, and the release exit
 criteria. The detailed language reference remains in
