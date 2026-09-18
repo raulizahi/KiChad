@@ -227,7 +227,11 @@ apply and is merged automatically by the next apply, so a retained journal is ne
 Managed deletions are matched to KiCad's per-item results by UUID (KiCad answers in UUID order,
 not request order), an item already absent from the live board counts as deleted, and a genuine
 refusal names the item and the reason; a wholesale design replacement therefore converges the
-existing project onto the new design regardless of stale editor state.  A product with several
+existing project onto the new design regardless of stale editor state.  Pad nets converge on
+every apply, not only at creation: after a placed footprint's metadata update, its live pads are
+read and exactly those whose net differs from the planned KDS connectivity are updated in place
+inside the same transaction (a numbered pad absent from the plan is cleared, unnumbered mechanical
+pads are left alone), so a net added to the KDS after a part was first placed reaches its pads.  A product with several
 boards is several KDS files in one project, each named after its KDS project so
 `<name>.kicad_kds`, `<name>.kicad_sch` (the KDS root sheet) and `<name>.kicad_pcb` pair up for DRC
 parity and fabrication; `design.apply` with `createBoard: true` writes a new empty KiCad 10 board
