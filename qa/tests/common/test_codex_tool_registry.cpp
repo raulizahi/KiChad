@@ -2056,6 +2056,160 @@ BOOST_AUTO_TEST_CASE( CreatesASecondBoardOnRequestBeforeApplying )
 }
 
 
+BOOST_AUTO_TEST_CASE( ConvergesPadNetsOnFootprintsThatAlreadyExist )
+{
+    // A net added to the KDS after a part was first placed must reach that part's pads on the
+    // next apply.  Pad nets used to be written only at footprint creation.
+    TOOL_PROJECT_FIXTURE fixture;
+    wxFileName socketPath( fixture.Root(), wxS( "api-padnet-test.sock" ) );
+    KINNG_REQUEST_SERVER server( "ipc://" + socketPath.GetFullPath().ToStdString() );
+    const std::string token = "qa-padnet-token";
+    const std::string footprintId = "00000000-0000-8000-8000-0000000000f1";
+    // pad number -> { pad id, live net }
+    std::map<std::string, std::pair<std::string, std::string>> pads = {
+        { "7", { "00000000-0000-8000-8000-000000000007", "GND" } },           // already right
+        { "8", { "00000000-0000-8000-8000-000000000008", "" } },              // missing net
+        { "13", { "00000000-0000-8000-8000-000000000013", "" } },             // missing net
+        { "30", { "00000000-0000-8000-8000-000000000030", "STALE_NET" } },    // removed from KDS
+        { "", { "00000000-0000-8000-8000-0000000000aa", "" } } };             // mechanical hole
+    int padUpdateCalls = 0;
+    std::vector<std::string> containers;
+    std::vector<std::string> masks;
+
+    const auto footprintMessage = [&]()
+    {
+        kiapi::board::types::FootprintInstance footprint;
+        footprint.mutable_id()->set_value( footprintId );
+
+        for( const auto& [number, pad] : pads )
+        {
+            kiapi::board::types::Pad native;
+            native.mutable_id()->set_value( pad.first );
+            native.set_number( number );
+            native.mutable_net()->set_name( pad.second );
+            footprint.mutable_definition()->add_items()->PackFrom( native );
+        }
+
+        return footprint;
+    };
+
+    server.SetCallback(
+            [&]( std::string* aSerializedRequest )
+            {
+                kiapi::common::ApiRequest request;
+                kiapi::common::ApiResponse response;
+                response.mutable_header()->set_kicad_token( token );
+                response.mutable_status()->set_status( kiapi::common::AS_OK );
+
+                if( !request.ParseFromString( *aSerializedRequest ) )
+                {
+                    response.mutable_status()->set_status( kiapi::common::AS_BAD_REQUEST );
+                }
+                else if( request.message().Is<kiapi::common::commands::GetItemsById>() )
+                {
+                    kiapi::common::commands::GetItemsResponse items;
+                    items.set_status( kiapi::common::types::IRS_OK );
+                    items.add_items()->PackFrom( footprintMessage() );
+                    response.mutable_message()->PackFrom( items );
+                }
+                else if( request.message().Is<kiapi::common::commands::UpdateItems>() )
+                {
+                    kiapi::common::commands::UpdateItems update;
+                    request.message().UnpackTo( &update );
+                    kiapi::common::commands::UpdateItemsResponse updated;
+                    updated.set_status( kiapi::common::types::IRS_OK );
+
+                    for( const google::protobuf::Any& item : update.items() )
+                    {
+                        auto* result = updated.add_updated_items();
+                        result->mutable_status()->set_code( kiapi::common::commands::ISC_OK );
+                        kiapi::board::types::Pad pad;
+
+                        if( item.UnpackTo( &pad ) )
+                        {
+                            for( auto& [number, live] : pads )
+                            {
+                                if( live.first == pad.id().value() )
+                                {
+                                    live.second = pad.net().name();
+                                    pad.set_number( number );
+                                }
+                            }
+
+                            result->mutable_item()->PackFrom( pad );
+                        }
+                        else
+                        {
+                            // Metadata update: echo the requested footprint back.
+                            result->mutable_item()->CopyFrom( item );
+                        }
+                    }
+
+                    for( const google::protobuf::Any& item : update.items() )
+                    {
+                        if( item.Is<kiapi::board::types::Pad>() )
+                        {
+                            ++padUpdateCalls;
+                            containers.push_back( update.header().container().value() );
+                            masks.push_back( update.header().field_mask().DebugString() );
+                            break;
+                        }
+                    }
+
+                    response.mutable_message()->PackFrom( updated );
+                }
+                else
+                {
+                    response.mutable_status()->set_status( kiapi::common::AS_UNHANDLED );
+                }
+
+                server.Reply( response.SerializeAsString() );
+            } );
+
+    KICHAD_IPC_CLIENT client( "org.kichad.qa", fixture.Root(), std::chrono::milliseconds( 2000 ) );
+    KICHAD_IPC_TARGET target;
+    target.socketUrl = "ipc://" + socketPath.GetFullPath().ToStdString();
+    target.kicadToken = token;
+    target.document.set_type( kiapi::common::types::DOCTYPE_PCB );
+    target.document.set_board_filename( "design.kicad_pcb" );
+
+    const JSON action = { { "action", "update_footprint_metadata" },
+                          { "component", "U102" },
+                          { "itemType", "footprint" },
+                          { "itemId", footprintId },
+                          { "instance",
+                            { { "value", "TSER953RHBT" },
+                              { "dnp", false },
+                              { "fields", JSON::object() },
+                              { "padNets",
+                                { { "7", "GND" }, { "8", "L_SER_PDB" }, { "13", "L_DOUT_N" } } } } } };
+    std::string error;
+    BOOST_REQUIRE_MESSAGE( KICHAD::CODEX_TOOLS::ExecutePcbActions(
+                                   client, target, JSON::array( { action } ), JSON::object(),
+                                   error ),
+                           error );
+
+    BOOST_CHECK_EQUAL( padUpdateCalls, 1 );
+    BOOST_REQUIRE_EQUAL( containers.size(), 1 );
+    BOOST_CHECK_EQUAL( containers[0], footprintId );
+    BOOST_CHECK_NE( masks[0].find( "net" ), std::string::npos );
+    BOOST_CHECK_EQUAL( pads["7"].second, "GND" );
+    BOOST_CHECK_EQUAL( pads["8"].second, "L_SER_PDB" );
+    BOOST_CHECK_EQUAL( pads["13"].second, "L_DOUT_N" );
+    BOOST_CHECK_EQUAL( pads["30"].second, "" );
+    BOOST_CHECK_EQUAL( pads[""].second, "" );
+
+    // Idempotent: once converged, a second apply reads the pads and changes nothing.
+    BOOST_REQUIRE_MESSAGE( KICHAD::CODEX_TOOLS::ExecutePcbActions(
+                                   client, target, JSON::array( { action } ), JSON::object(),
+                                   error ),
+                           error );
+    BOOST_CHECK_EQUAL( padUpdateCalls, 1 );
+
+    server.Stop();
+}
+
+
 BOOST_AUTO_TEST_CASE( MatchesManagedDeletionsByIdentityAndToleratesAbsentItems )
 {
     // KiCad answers DeleteItems from a std::map<KIID, status>, i.e. in UUID order, while the

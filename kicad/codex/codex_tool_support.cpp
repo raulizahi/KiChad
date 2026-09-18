@@ -6230,6 +6230,112 @@ bool updateFootprintMetadata( const KICHAD_IPC_CLIENT& aClient,
 }
 
 
+/**
+ * Converge an existing footprint's pad nets on the planned KDS connectivity.
+ *
+ * Pad nets used to be written only when a footprint was created, so a net added to or removed
+ * from the KDS after a part was first placed never reached that part's pads, however often the
+ * design was applied.  This reads the live pads and updates, in place and inside the caller's
+ * transaction, exactly those whose net differs: a numbered pad absent from the plan is cleared,
+ * mechanical pads with no number are left alone.  An unchanged footprint costs one read.
+ */
+bool syncFootprintPadNets( const KICHAD_IPC_CLIENT& aClient, const KICHAD_IPC_TARGET& aTarget,
+                           const nlohmann::json& aAction, std::string& aError )
+{
+    using namespace kiapi::board::types;
+
+    if( !aAction.contains( "instance" ) || !aAction.at( "instance" ).contains( "padNets" ) )
+        return true;
+
+    const std::string footprintId = aAction.at( "itemId" ).get<std::string>();
+    const nlohmann::json& planned = aAction.at( "instance" ).at( "padNets" );
+    const std::string reference = aAction.value( "component", footprintId );
+
+    kiapi::common::commands::GetItemsById query;
+    query.mutable_header()->mutable_document()->CopyFrom( aTarget.document );
+    query.add_items()->set_value( footprintId );
+    kiapi::common::ApiResponse queryResponse;
+
+    if( !aClient.Call( aTarget, query, queryResponse, aError ) )
+        return false;
+
+    kiapi::common::commands::GetItemsResponse items;
+    FootprintInstance live;
+
+    if( !queryResponse.message().UnpackTo( &items )
+        || items.status() != kiapi::common::types::IRS_OK || items.items_size() != 1
+        || !items.items( 0 ).UnpackTo( &live ) || live.id().value() != footprintId )
+    {
+        aError = "KiCad did not return footprint " + reference + " for its pad-net update";
+        return false;
+    }
+
+    kiapi::common::commands::UpdateItems update;
+    update.mutable_header()->mutable_document()->CopyFrom( aTarget.document );
+    update.mutable_header()->mutable_container()->set_value( footprintId );
+    update.mutable_header()->mutable_field_mask()->add_paths( "net" );
+    std::map<std::string, std::string> expected;
+
+    for( const google::protobuf::Any& packed : live.definition().items() )
+    {
+        Pad pad;
+
+        if( !packed.UnpackTo( &pad ) || pad.number().empty() )
+            continue;
+
+        const std::string want = planned.contains( pad.number() )
+                                         ? planned.at( pad.number() ).get<std::string>()
+                                         : std::string();
+
+        if( pad.net().name() == want )
+            continue;
+
+        Pad requested;
+        requested.mutable_id()->set_value( pad.id().value() );
+        requested.mutable_net()->set_name( want );
+        update.add_items()->PackFrom( requested );
+        expected.emplace( pad.id().value(), want );
+    }
+
+    if( expected.empty() )
+        return true;
+
+    kiapi::common::ApiResponse updateResponse;
+
+    if( !aClient.Call( aTarget, update, updateResponse, aError ) )
+        return false;
+
+    kiapi::common::commands::UpdateItemsResponse updated;
+
+    if( !updateResponse.message().UnpackTo( &updated )
+        || updated.status() != kiapi::common::types::IRS_OK
+        || updated.updated_items_size() != static_cast<int>( expected.size() ) )
+    {
+        aError = "KiCad returned an invalid pad-net update response for " + reference;
+        return false;
+    }
+
+    for( const auto& result : updated.updated_items() )
+    {
+        Pad active;
+
+        if( result.status().code() != kiapi::common::commands::ISC_OK
+            || !result.item().UnpackTo( &active ) || !expected.contains( active.id().value() )
+            || active.net().name() != expected.at( active.id().value() ) )
+        {
+            aError = "KiCad rejected a pad-net update on " + reference + " pad "
+                     + active.number()
+                     + ( result.status().error_message().empty()
+                                 ? std::string()
+                                 : ": " + result.status().error_message() );
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
 kiapi::board::types::BoardLayer footprintPresentationLayer( const std::string& aLayer )
 {
     using kiapi::board::types::BoardLayer;
@@ -6778,8 +6884,11 @@ bool executePcbActions( const KICHAD_IPC_CLIENT& aClient, const KICHAD_IPC_TARGE
 
     for( const nlohmann::json* action : footprintMetadataUpdates )
     {
-        if( !updateFootprintMetadata( aClient, aTarget, *action, aError ) )
+        if( !updateFootprintMetadata( aClient, aTarget, *action, aError )
+            || !syncFootprintPadNets( aClient, aTarget, *action, aError ) )
+        {
             return false;
+        }
     }
 
     for( size_t begin = 0; begin < deletes.size(); begin += 500 )
