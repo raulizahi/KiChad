@@ -21,11 +21,16 @@ include_directories(
     )
 
 set( KICAD_SRCS
+    codex/block_diagram.cpp
     codex/board_render_artifact_validator.cpp
     codex/board_ps_artifact_validator.cpp
     codex/codex_app_server_client.cpp
     codex/codex_protocol_log.cpp
     codex/codex_tool_design.cpp
+    codex/codex_tool_diagram.cpp
+    codex/codex_tool_document.cpp
+    codex/pdf_text_document.cpp
+    codex/svg_raster.cpp
     codex/codex_tool_fabricate.cpp
     codex/codex_tool_inspect.cpp
     codex/codex_tool_layout.cpp

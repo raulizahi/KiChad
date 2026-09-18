@@ -795,6 +795,17 @@ void PCB_EDIT_FRAME::OnCrossProbeFlashTimer( wxTimerEvent& aEvent )
 
 PCB_EDIT_FRAME::~PCB_EDIT_FRAME()
 {
+#ifdef KICAD_IPC_API
+    // Normally done in doCloseWindow(), but a frame destroyed without the close path
+    // (e.g. programmatic teardown) must not leave a dangling handler registered: a
+    // queued API request dispatched afterwards is a use-after-free.  The common
+    // handler has no doCloseWindow() deregistration at all, so this is its only one.
+    Pgm().GetApiServer().DeregisterHandler( m_apiHandler.get() );
+
+    if( m_apiHandlerCommon )
+        Pgm().GetApiServer().DeregisterHandler( m_apiHandlerCommon.get() );
+#endif
+
     ScriptingOnDestructPcbEditFrame( this );
 
     if( ADVANCED_CFG::GetCfg().m_ShowEventCounters )
@@ -1504,9 +1515,11 @@ bool PCB_EDIT_FRAME::canCloseWindow( wxCloseEvent& aEvent )
 
 void PCB_EDIT_FRAME::doCloseWindow()
 {
-    // Unregister the autosave saver before any cleanup that might invalidate the board
-    if( GetBoard() )
-        Kiway().LocalHistory().UnregisterSaver( GetBoard() );
+    // Unregister the autosave saver before any cleanup that might invalidate the board.  The
+    // saver is keyed by this frame, not by the board: loading another board (for example when
+    // a second board's project is opened) replaces the BOARD object, and a saver keyed by the
+    // old pointer would outlive both the board and, after close, this frame.
+    Kiway().LocalHistory().UnregisterSaver( this );
 
     // On Windows 7 / 32 bits, on OpenGL mode only, Pcbnew crashes
     // when closing this frame if a footprint was selected, and the footprint editor called
@@ -3234,10 +3247,15 @@ void PCB_EDIT_FRAME::ProjectChanged()
     // file I/O happen on a background thread to avoid blocking the UI.
     if( GetBoard() )
     {
+        // Keyed by the frame so a board swap neither leaks a stale entry nor registers twice;
+        // the callback always serializes whatever board the frame currently holds.
         Kiway().LocalHistory().RegisterSaver(
-                GetBoard(),
+                this,
                 [this]( const wxString& aProjectPath, std::vector<HISTORY_FILE_DATA>& aFileData )
                 {
+                    if( !GetBoard() )
+                        return;
+
                     // See SCHEMATIC::SaveToHistory: the dirty check is only valid in ZIP
                     // mode.  In INCREMENTAL mode the manual-save flow clears the dirty
                     // flag before the saver runs, so filtering would drop the snapshot.

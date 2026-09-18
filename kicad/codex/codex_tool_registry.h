@@ -49,16 +49,18 @@ public:
     using NATIVE_FABRICATION_RUNNER =
             std::function<bool( const wxFileName&, const wxFileName&, const JSON&,
                                 const wxFileName&, std::string& )>;
-    using NATIVE_PREVIEW_RUNNER =
-            std::function<bool( const std::string&, const wxFileName&,
-                                const std::vector<int>&, const std::vector<wxFileName>&,
-                                std::string& )>;
     using NATIVE_SCHEMATIC_VALIDATOR =
             std::function<bool( const wxFileName&, const JSON&, const JSON&,
                                 std::string& )>;
+    using NATIVE_PREVIEW_RUNNER =
+            std::function<bool( const std::string&, const wxFileName&,
+                                const wxFileName&, int, std::string& )>;
+    using NATIVE_PDF_RUNNER =
+            std::function<bool( const std::string&, const wxFileName&,
+                                const wxFileName&, const std::string&, std::string& )>;
     // Bump whenever the model-visible tool or capability contract changes so a project cannot
     // resume a persistent thread created with a broader or incompatible surface.
-    static constexpr int SCHEMA_VERSION = 18;
+    static constexpr int SCHEMA_VERSION = 20;
 
     explicit CODEX_TOOL_REGISTRY( std::function<wxString()> aProjectPathProvider,
                                   std::function<bool()> aMutationGuard = {},
@@ -70,7 +72,8 @@ public:
                                           aSymbolLibraryValidator = {},
                                   std::function<bool( const wxFileName&, std::string& )>
                                           aFootprintLibraryValidator = {},
-                                  NATIVE_PREVIEW_RUNNER aNativePreviewRunner = {} );
+                                  NATIVE_PREVIEW_RUNNER aNativePreviewRunner = {},
+                                  NATIVE_PDF_RUNNER aNativePdfRunner = {} );
 
     JSON Specs() const;
 
@@ -80,6 +83,8 @@ public:
     wxString ExternalLayoutTool() const;
     void SetExternalLayoutLayers( int aLayers );
     int ExternalLayoutLayers() const;
+    void SetExternalLayoutEnabled( bool aEnabled );
+    bool ExternalLayoutEnabled() const;
 
     static bool RequiresFinalConfirmation( const std::string& aTool,
                                            const JSON& aArguments );
@@ -107,10 +112,13 @@ private:
     JSON handleVerify( const JSON& aArguments, const wxString& aProjectPath ) const;
     JSON handleLayout( const JSON& aArguments, const wxString& aProjectPath,
                        bool aMutationAvailable ) const;
+    JSON handleDiagram( const JSON& aArguments, const wxString& aProjectPath ) const;
+    JSON handleDocument( const JSON& aArguments, const wxString& aProjectPath ) const;
 
     mutable std::mutex m_externalLayoutToolMutex;
     wxString           m_externalLayoutTool;
     int                m_externalLayoutLayers = 2;
+    bool               m_externalLayoutEnabled = false;
     JSON handleElectricalVerify( const JSON& aArguments,
                                  const wxString& aProjectPath ) const;
     JSON handleLayoutVerify( const JSON& aArguments, const wxString& aProjectPath ) const;
@@ -133,6 +141,7 @@ private:
     std::function<bool( const wxFileName&, std::string& )> m_symbolLibraryValidator;
     std::function<bool( const wxFileName&, std::string& )> m_footprintLibraryValidator;
     NATIVE_PREVIEW_RUNNER m_nativePreviewRunner;
+    NATIVE_PDF_RUNNER     m_nativePdfRunner;
 };
 
 #endif // KICHAD_CODEX_TOOL_REGISTRY_H

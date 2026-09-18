@@ -33,6 +33,7 @@
 
 
 class wxButton;
+class wxCheckBox;
 class wxChoice;
 class wxStaticText;
 class wxTextCtrl;
@@ -135,6 +136,7 @@ private:
     void appendActivity( const wxString& aText );
     void appendDialogLog( const wxString& aRole, const std::string& aText );
     bool submitUserMessage( const wxString& aMessage );
+    void maybeAutoContinue( const wxString& aAgentText );
     void setBusy( bool aBusy );
     void setLoginPending( bool aPending );
     void setStatus( const wxString& aStatus );
@@ -174,6 +176,8 @@ private:
     wxTextCtrl*               m_input;
     wxButton*                 m_sendButton;
     wxButton*                 m_stopButton;
+    wxCheckBox*               m_autoContinueCheckbox;
+    int                       m_autoContinueRemaining;
     wxButton*                 m_revertButton;
     wxButton*                 m_newConversationButton;
     CODEX_USER_INPUT_DIALOG*  m_userInputDialog;

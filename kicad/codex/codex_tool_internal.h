@@ -45,6 +45,8 @@ nlohmann::json PcbSpec();
 nlohmann::json VerifySpec();
 nlohmann::json FabricateSpec();
 nlohmann::json LayoutSpec();
+nlohmann::json DiagramSpec();
+nlohmann::json DocumentSpec();
 
 class PRIVATE_TEMPORARY_DIRECTORY
 {
@@ -165,9 +167,38 @@ bool ExecutePcbActions( const KICHAD_IPC_CLIENT& aClient, const KICHAD_IPC_TARGE
 bool RunNativeKiCadCheck( const std::string& aCheck, const wxFileName& aInput,
                           std::string& aReport, std::string& aError );
 bool RunNativeKiCadPreview( const std::string& aView, const wxFileName& aInput,
-                            const std::vector<int>& aPages,
-                            const std::vector<wxFileName>& aOutputs,
-                            std::string& aError );
+                            const wxFileName& aOutput, int aPage, std::string& aError );
+/**
+ * Resolve a project-relative .pdf destination that may not exist yet, canonicalizing the
+ * deepest existing ancestor so a symlink cannot redirect the document outside the project and
+ * refusing to replace any existing file that does not already carry a PDF signature.
+ */
+bool ResolveProjectPdfDestination( const wxString& aProjectPath, const std::string& aRelativePath,
+                                   wxFileName& aResolved, std::string& aRelativeResolved,
+                                   std::string& aError );
+/** Same confinement for any extension (no dot), e.g. "kicad_pcb" for a board to be created. */
+bool ResolveProjectDestination( const wxString& aProjectPath, const std::string& aRelativePath,
+                                const std::string& aExtension, wxFileName& aResolved,
+                                std::string& aRelativeResolved, std::string& aError );
+/** Rasterize one PDF page to a margin-cropped PNG with pdftoppm from PATH. */
+bool RasterizePdfPreview( const wxFileName& aPdf, const wxFileName& aOutput,
+                          std::string& aError, int aPage = 1 );
+/**
+ * Locate a helper executable: PATH first, then the application directory, KICHAD_TOOL_PATH,
+ * and the standard package-manager prefixes that desktop launches leave out of PATH.
+ */
+bool FindExternalTool( const wxString& aName, wxFileName& aExecutable );
+/**
+ * Run an external executable with a bounded 120 second budget, capturing stdout and stderr
+ * to `<aIndex>.stdout` and `<aIndex>.stderr` below aLogDirectory.
+ */
+bool RunExternalCommand( const wxFileName& aExecutable, const std::vector<std::string>& aArguments,
+                         const wxFileName& aLogDirectory, size_t aIndex, const std::string& aKind,
+                         std::string& aError );
+/** Plot a complete schematic hierarchy or a multipage board layer set to a PDF document. */
+bool RunNativeKiCadPdf( const std::string& aKind, const wxFileName& aInput,
+                        const wxFileName& aOutput, const std::string& aLayers,
+                        std::string& aError );
 bool CanonicalizeExisting( wxFileName& aPath, bool aDirectory = false );
 bool CreateFabricationVerificationSnapshot(
         const wxFileName& aProjectRoot, const wxFileName& aBoard,
@@ -180,6 +211,7 @@ nlohmann::json BuildFabricationPlan( const nlohmann::json& aIr,
 bool BuildNativeNetlistValidationPlan(
         const nlohmann::json& aIr, const nlohmann::json& aResolvedSymbols,
         const std::string& aFileStem, nlohmann::json& aPlan, std::string& aError );
+nlohmann::json DatasheetConformanceIssues( const nlohmann::json& aIr );
 bool RunNativeKiCadFabrication( const wxFileName& aBoard,
                                 const wxFileName& aSchematic,
                                 const nlohmann::json& aPlan,

@@ -9,7 +9,22 @@ upstream development branch are intentionally excluded.  The pinned version is r
 `.kichad-base-version`, and the build script verifies both the Git ancestry and resulting binary.
 
 See [KICHAD.md](KICHAD.md) for the Linux quick start, repository layout, runtime libraries, and
-upstream-sync workflow.  KiChad is an independent project and is not an official KiCad build.
+upstream-sync workflow.
+
+Branches on the KiChad repository:
+
+- `latest` always points at `feature/common-os-features`, the platform-neutral KiChad work
+  (Codex tools, KDS compiler, fabrication, documentation).  It builds on every platform but carries
+  no platform-specific presets or launch tooling.
+- `feature/macos-port` is `feature/common-os-features` plus the macOS additions: the sample
+  `kichad-macos` CMake preset, the bundle scaffolding and launch scripts, and the macOS build notes
+  in `KICHAD.md`.  macOS users should pull this branch.
+- `feature/windows-port` is `feature/common-os-features` plus the Windows additions: the vcpkg
+  triplet and preset, MSVC compatibility changes, and named-pipe IPC discovery.  Windows users
+  should pull this branch.
+
+Platform-neutral changes land on `feature/common-os-features` first and are merged into both port
+branches.  KiChad is an independent project and is not an official KiCad build.
 The consolidated [production status and roadmap](docs/production-status.md) records what is
 implemented, what has been qualified, the remaining production blockers, and the release exit
 criteria. The detailed language reference remains in
@@ -67,21 +82,34 @@ stored by Codex in an isolated KiChad Codex home, not in the project; set `KICHA
 when you intentionally want a different state location.  The design-tool boundary and safety model
 are documented in [docs/kichad-codex-architecture.md](docs/kichad-codex-architecture.md).  Each
 submitted turn first snapshots the project through KiCad's local-history system, and the panel can
-restore that complete pre-turn state.  The initial native `project` and `inspect` calls expose
+restore that complete pre-turn state.  Starting a new conversation keeps the project's history by
+default, so requirements never need repeating after a tool or policy update.  The initial native `project` and `inspect` calls expose
 project context and bounded, read-only KiCad 10 design inspection without shell or GUI automation.
 `inspect.render` uses the matching native KiCad backend to attach cropped schematic pages, a
 production PCB (`pcb2d`), assembly/layout PCB (`pcblayout`, including Fab fields and courtyards),
 or 3D board PNG directly to the Codex tool result, so the model can review actual generated documents
 while iterating; these images are derived previews under `.kichad/previews/`, not another design
-representation. Schematic preview revisions hash the complete referenced hierarchy, so changing a
-child sheet cannot reuse a stale image. Omitting `page` renders a hierarchy overview with each
-root-level sheet box populated by a scaled preview of that child, plus up to 24 referenced
-subsheets as separate full-size model-visible images in one native export; the response reports
-truncation, and an explicit page renders any one page. Superseded images for the same view are removed after a successful render. KDS
-`place` declarations can independently control each footprint Reference and
+representation. Previews are plotted as SVG and rasterized in-process, so `kicad-cli` is the only
+executable KiChad needs. `inspect.pdf` writes a complete schematic hierarchy or a multipage board
+layer PDF into the project (`documentation/<stem>.pdf` by default) for the user, without the
+fabrication gates. KDS `place` declarations can independently control each footprint Reference and
 Value field's visibility, absolute position, presentation layer, size, stroke, angle,
-justification, and font styling. The Ubuntu bootstrap installs Poppler for the bounded PDF-to-PNG
-stage. The
+justification, and font styling.
+
+Two document tools round out the agent's surface. `diagram` renders block and architecture diagrams
+natively: the agent supplies Mermaid flowchart source (directions, every standard node shape,
+labelled solid/dotted/thick links, chains, `&` fan-out, nested subgraphs, class and style colours)
+and KiChad lays it out and plots a PDF with its own plotter, saving the `.mmd` source beside it and
+attaching a PNG preview, so block diagrams arrive as project documents instead of Mermaid text to
+render elsewhere. `document` is the agent's route to PDF datasheets, because the owned Codex process
+has no shell, no file tool, and no chat attachments: `import` copies a PDF the user names by absolute
+path (below the home directory) into `datasheets/`, `fetch` downloads an https PDF up to 64 MiB,
+`read` returns page-range text, `search` reports matches with page numbers, and `list` enumerates
+project PDFs. Reading is native: KiChad's own bounded PDF text reader tolerates damaged
+cross-reference tables, decodes the standard stream filters and object streams, and recovers text
+through ToUnicode maps and font encodings while keeping table columns aligned. Rendering a
+datasheet page as an image (`document.render`) is the one optional extra that needs Poppler's
+`pdftoppm`; everything else runs in-process. The
 `design` call returns bounded paged semantic context, reads exact source, compiles, previews,
 atomically saves, and transactionally
 applies reusable `.kicad_kds` project sidecars. Preview and apply both stage the generated schematic

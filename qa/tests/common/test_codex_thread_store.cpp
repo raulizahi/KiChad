@@ -63,6 +63,43 @@ BOOST_AUTO_TEST_CASE( PersistsConversationAcrossNativeToolSchemaChanges )
 }
 
 
+BOOST_AUTO_TEST_CASE( ParsesProjectDialogLogsIntoConversationHistory )
+{
+    const std::string log =
+            "[2026-09-16 20:58:53] USER:\n"
+            "did I tell you that I want serializers between the image sensors and the STM32?\n\n"
+            "[2026-09-16 20:59:01] CODEX:\n"
+            "No. Should I make it a firm requirement?\n\n"
+            "Second paragraph with a [bracket] inside.\n\n"
+            "[2026-09-16 20:59:07] USER:\n"
+            "yes\n\n"
+            "[2026-09-16 21:00:06] CODEX:\n"
+            "Confirmed and recorded.\n\n";
+
+    std::vector<CODEX_THREAD_STORE::MESSAGE> messages =
+            CODEX_THREAD_STORE::ParseDialogLog( log );
+    BOOST_REQUIRE_EQUAL( messages.size(), 4 );
+    BOOST_CHECK_EQUAL( messages[0].role, "user" );
+    BOOST_CHECK_EQUAL( messages[0].text,
+                       "did I tell you that I want serializers between the image sensors and the STM32?" );
+    BOOST_CHECK_EQUAL( messages[1].role, "assistant" );
+    BOOST_CHECK_EQUAL( messages[1].text,
+                       "No. Should I make it a firm requirement?\n\nSecond paragraph with a [bracket] inside." );
+    BOOST_CHECK_EQUAL( messages[2].text, "yes" );
+    BOOST_CHECK_EQUAL( messages[3].role, "assistant" );
+
+    // The byte budget keeps the newest messages and starts on a user message.
+    std::vector<CODEX_THREAD_STORE::MESSAGE> recent =
+            CODEX_THREAD_STORE::ParseDialogLog( log, 40 );
+    BOOST_REQUIRE_EQUAL( recent.size(), 2 );
+    BOOST_CHECK_EQUAL( recent[0].text, "yes" );
+    BOOST_CHECK_EQUAL( recent[1].text, "Confirmed and recorded." );
+
+    BOOST_CHECK( CODEX_THREAD_STORE::ParseDialogLog( "" ).empty() );
+    BOOST_CHECK( CODEX_THREAD_STORE::ParseDialogLog( "no headers here\n" ).empty() );
+}
+
+
 BOOST_AUTO_TEST_CASE( LoadsLegacyUnversionedThreadBindingsForHistoryImport )
 {
     const wxString root = wxFileName::CreateTempFileName( wxS( "kichad-thread-legacy-" ) );

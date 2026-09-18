@@ -41,6 +41,15 @@ public:
     {}
 
     BINDING Load( const wxString& aProjectPath ) const;
+
+    /**
+     * Recover a conversation from a project's codex_dialog.txt transcript (entries of the form
+     * "[YYYY-MM-DD HH:MM:SS] USER:" / "CODEX:" followed by the text and a blank line).  Only
+     * the most recent aMaxBytes of message text is kept so a long project history still fits
+     * a fresh thread.
+     */
+    static std::vector<MESSAGE> ParseDialogLog( const std::string& aLog,
+                                                size_t aMaxBytes = 256 * 1024 );
     bool Save( const wxString& aProjectPath, const BINDING& aBinding,
                wxString* aError = nullptr ) const;
     bool Clear( const wxString& aProjectPath, wxString* aError = nullptr ) const;

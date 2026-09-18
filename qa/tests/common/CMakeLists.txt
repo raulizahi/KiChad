@@ -44,6 +44,9 @@ set( QA_COMMON_SRCS
     test_commit.cpp
     test_codex_app_server_client.cpp
     test_codex_agent_policy.cpp
+    test_block_diagram.cpp
+    test_pdf_text_document.cpp
+    test_svg_raster.cpp
     test_codex_tool_fabricate.cpp
     test_codex_tool_registry.cpp
     test_codex_thread_store.cpp
@@ -129,7 +132,12 @@ set( QA_COMMON_SRCS
     ${CMAKE_SOURCE_DIR}/kicad/codex/codex_paths.cpp
     ${CMAKE_SOURCE_DIR}/kicad/codex/codex_protocol_log.cpp
     ${CMAKE_SOURCE_DIR}/kicad/codex/codex_thread_store.cpp
+    ${CMAKE_SOURCE_DIR}/kicad/codex/block_diagram.cpp
     ${CMAKE_SOURCE_DIR}/kicad/codex/codex_tool_design.cpp
+    ${CMAKE_SOURCE_DIR}/kicad/codex/codex_tool_diagram.cpp
+    ${CMAKE_SOURCE_DIR}/kicad/codex/codex_tool_document.cpp
+    ${CMAKE_SOURCE_DIR}/kicad/codex/pdf_text_document.cpp
+    ${CMAKE_SOURCE_DIR}/kicad/codex/svg_raster.cpp
     ${CMAKE_SOURCE_DIR}/kicad/codex/codex_tool_fabricate.cpp
     ${CMAKE_SOURCE_DIR}/kicad/codex/codex_tool_inspect.cpp
     ${CMAKE_SOURCE_DIR}/kicad/codex/codex_tool_layout.cpp

@@ -21,6 +21,7 @@
 #include <algorithm>
 
 #include <wx/button.h>
+#include <wx/checkbox.h>
 #include <wx/choice.h>
 #include <wx/datetime.h>
 #include <wx/ffile.h>
@@ -198,6 +199,8 @@ CODEX_PANEL::CODEX_PANEL( wxWindow* aParent, std::function<wxString()> aProjectP
         m_input( nullptr ),
         m_sendButton( nullptr ),
         m_stopButton( nullptr ),
+        m_autoContinueCheckbox( nullptr ),
+        m_autoContinueRemaining( 0 ),
         m_revertButton( nullptr ),
         m_newConversationButton( nullptr ),
         m_userInputDialog( nullptr ),
@@ -241,8 +244,9 @@ CODEX_PANEL::CODEX_PANEL( wxWindow* aParent, std::function<wxString()> aProjectP
     m_revertButton->Disable();
     m_newConversationButton = new wxButton( this, wxID_ANY, wxS( "+" ), wxDefaultPosition,
                                             wxDefaultSize, wxBU_EXACTFIT );
-    m_newConversationButton->SetMinSize( wxSize( FromDIP( 28 ), FromDIP( 28 ) ) );
-    m_newConversationButton->SetToolTip( _( "Start a new Codex conversation" ) );
+    m_newConversationButton->SetBitmap( KiBitmapBundle( BITMAPS::new_document ) );
+    m_newConversationButton->SetToolTip( _( "Start a new Codex conversation; the project's "
+                                            "history can be carried into it" ) );
     m_newConversationButton->SetName( _( "New conversation" ) );
     m_newConversationButton->Disable();
     conversationRow->Add( m_processStatus, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP( 8 ) );
@@ -286,8 +290,14 @@ CODEX_PANEL::CODEX_PANEL( wxWindow* aParent, std::function<wxString()> aProjectP
     wxBoxSizer* actionRow = new wxBoxSizer( wxHORIZONTAL );
     m_stopButton = new wxButton( this, wxID_ANY, _( "Stop" ) );
     m_sendButton = new wxButton( this, wxID_ANY, _( "Send" ) );
+    m_autoContinueCheckbox = new wxCheckBox( this, wxID_ANY, _( "Auto-continue" ) );
+    m_autoContinueCheckbox->SetToolTip( _( "When a turn completes without asking a question or "
+                                           "requesting approval, automatically send \"Continue.\" "
+                                           "(up to 25 times per message you send). Stop ends the "
+                                           "chain." ) );
     m_stopButton->Disable();
     m_sendButton->Disable();
+    actionRow->Add( m_autoContinueCheckbox, 0, wxALIGN_CENTER_VERTICAL );
     actionRow->AddStretchSpacer();
     actionRow->Add( m_stopButton, 0, wxRIGHT, FromDIP( 6 ) );
     actionRow->Add( m_sendButton );
@@ -1390,6 +1400,7 @@ void CODEX_PANEL::RefreshExternalLayoutSettings()
     }
 
     m_externalLayoutMode = mode;
+    m_toolRegistry.SetExternalLayoutEnabled( mode );
     m_toolRegistry.SetExternalLayoutTool( tool );
     m_toolRegistry.SetExternalLayoutLayers( layers );
 }
@@ -1546,6 +1557,16 @@ wxString CODEX_PANEL::projectPath() const
 
 void CODEX_PANEL::selectProjectThread()
 {
+    // KiCad unloads the active project before loading another one, and both steps notify us.
+    // While a board's own project is being swapped in (a second board of the same product,
+    // living in the same directory), the provider transiently reports no project at all;
+    // rebinding on that would discard the turn snapshot and lock every mutating tool for the
+    // rest of the turn.  Keep the current binding until a real directory is reported.
+    const wxString provided = m_projectPathProvider ? m_projectPathProvider() : wxString();
+
+    if( provided.IsEmpty() && !m_threadProjectPath.IsEmpty() )
+        return;
+
     wxString activePath = projectPath();
 
     if( activePath == m_threadProjectPath )
@@ -1828,6 +1849,8 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
             setStatus( wxString::Format( _( "Codex turn failed: %s" ), error ) );
         }
 
+        const wxString finalAgentText = wxString::FromUTF8( m_currentAgentMessage );
+
         if( !m_currentAgentMessage.empty() )
         {
             m_conversationHistory.push_back( { "assistant", m_currentAgentMessage } );
@@ -1840,6 +1863,9 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
         m_agentResponseOpen = false;
         m_turnId.clear();
         setBusy( false );
+
+        if( status == "completed" )
+            maybeAutoContinue( finalAgentText );
     }
     else if( method == "error" )
     {
@@ -2333,6 +2359,11 @@ void CODEX_PANEL::onSend( wxCommandEvent& aEvent )
     }
 
     m_input->Clear();
+
+    // Each user-authored message refills the auto-continue budget; automatic
+    // continuations spend it without refilling.
+    m_autoContinueRemaining = 25;
+
     submitUserMessage( message );
 }
 
@@ -2377,8 +2408,66 @@ bool CODEX_PANEL::submitUserMessage( const wxString& aMessage )
 }
 
 
+void CODEX_PANEL::maybeAutoContinue( const wxString& aAgentText )
+{
+    if( !m_autoContinueCheckbox || !m_autoContinueCheckbox->IsChecked() )
+        return;
+
+    if( m_autoContinueRemaining <= 0 )
+        return;
+
+    // The agent is told to state its stopping reason.  Hand control back to the user when
+    // the response asks a question, requests approval, or declares the scope complete;
+    // otherwise the stop was a routine checkpoint and the work should keep flowing.
+    const wxString tail = aAgentText.Right( 800 ).Lower();
+
+    bool asksQuestion = false;
+
+    for( size_t pos = tail.find( '?' ); pos != wxString::npos; pos = tail.find( '?', pos + 1 ) )
+    {
+        if( pos + 1 >= tail.size() || tail[pos + 1] == ' ' || tail[pos + 1] == '\n'
+            || tail[pos + 1] == ')' )
+        {
+            asksQuestion = true;
+            break;
+        }
+    }
+
+    // Terse responses signal a stall, not a work turn: a genuine progress pass always
+    // produces a substantial report.  Continuing against a stall just burns turns.
+    const bool stalled = aAgentText.size() < 200 || tail.Contains( wxS( "blocked" ) )
+                         || tail.Contains( wxS( "cannot continue" ) )
+                         || tail.Contains( wxS( "cannot safely" ) )
+                         || tail.Contains( wxS( "unable to continue" ) )
+                         || tail.Contains( wxS( "waiting for" ) );
+
+    if( asksQuestion || stalled || tail.Contains( wxS( "approval" ) )
+        || tail.Contains( wxS( "approve" ) )
+        || tail.Contains( wxS( "scope is complete" ) )
+        || tail.Contains( wxS( "requested scope" ) ) )
+    {
+        appendTranscript( _( "\n[Auto-continue paused: Codex needs your input.]\n" ) );
+        return;
+    }
+
+    --m_autoContinueRemaining;
+    appendTranscript( wxString::Format( _( "\n[Auto-continuing (%d remaining)...]\n" ),
+                                        m_autoContinueRemaining ) );
+    CallAfter(
+            [this]()
+            {
+                if( !m_turnId.empty() || m_threadId.empty() )
+                    return;
+
+                submitUserMessage( _( "Continue." ) );
+            } );
+}
+
+
 void CODEX_PANEL::onStop( wxCommandEvent& aEvent )
 {
+    m_autoContinueRemaining = 0;
+
     if( m_threadId.empty() || m_turnId.empty() )
         return;
 
@@ -2428,22 +2517,65 @@ void CODEX_PANEL::onNewConversation( wxCommandEvent& aEvent )
         return;
     }
 
-    wxString clearError;
+    // A fresh thread picks up the current tool set and policy.  By default the project's
+    // conversation history travels with it, so requirements stated earlier are not lost;
+    // clearing is an explicit choice.
+    wxMessageDialog choice( this,
+                            _( "Start a new Codex conversation for this project?\n\n"
+                               "Keep history: the new conversation is seeded with everything "
+                               "said so far, so nothing needs repeating.\n"
+                               "Clear history: the new conversation starts from the project "
+                               "files alone." ),
+                            _( "New Codex conversation" ),
+                            wxYES_NO | wxCANCEL | wxICON_QUESTION );
+    choice.SetYesNoCancelLabels( _( "Keep history" ), _( "Clear history" ), _( "Cancel" ) );
+    const int decision = choice.ShowModal();
 
-    if( !m_threadStore.Clear( m_threadProjectPath, &clearError ) )
-    {
-        appendTranscript( wxString::Format( _( "\n[Could not start a new conversation: %s]\n" ),
-                                            clearError ) );
+    if( decision == wxID_CANCEL )
         return;
+
+    const bool keepHistory = decision == wxID_YES;
+
+    if( keepHistory && m_conversationHistory.empty() )
+    {
+        // The saved binding may already be gone (an earlier cleared conversation); the
+        // project's transcript log still has everything.
+        wxString dir = m_projectPathProvider ? m_projectPathProvider() : wxString();
+        wxFFile  log( wxFileName( dir, wxS( "codex_dialog.txt" ) ).GetFullPath(), wxS( "rb" ) );
+        wxString text;
+
+        if( log.IsOpened() && log.ReadAll( &text, wxConvUTF8 ) )
+        {
+            m_conversationHistory =
+                    CODEX_THREAD_STORE::ParseDialogLog( std::string( text.ToUTF8() ) );
+        }
     }
 
     const std::string previousThreadId =
             m_threadId.empty() ? m_savedThreadId : m_threadId;
+
+    if( keepHistory )
+    {
+        // Leave the binding in place (it still names the archived thread) so a relaunch before
+        // the next Send renders the same history; the next thread start re-seeds from it.
+        persistConversation();
+    }
+    else
+    {
+        wxString clearError;
+
+        if( !m_threadStore.Clear( m_threadProjectPath, &clearError ) )
+        {
+            appendTranscript( wxString::Format( _( "\n[Could not start a new conversation: %s]\n" ),
+                                                clearError ) );
+            return;
+        }
+
+        m_conversationHistory.clear();
+    }
+
     m_threadId.clear();
     m_savedThreadId.clear();
-    clearUserInputRequests();
-    m_pendingSteers.clear();
-    m_conversationHistory.clear();
     m_currentAgentMessage.clear();
     m_turnId.clear();
     m_turnSnapshotHash.clear();
@@ -2453,7 +2585,19 @@ void CODEX_PANEL::onNewConversation( wxCommandEvent& aEvent )
     m_agentResponseOpen = false;
     m_transcript->Clear();
     m_activity->Clear();
-    appendTranscript( _( "[New conversation started. The previous context has been cleared.]\n" ) );
+
+    if( keepHistory )
+    {
+        renderConversation();
+        appendTranscript( wxString::Format(
+                _( "\n[New conversation started with %zu earlier messages carried over.]\n" ),
+                m_conversationHistory.size() ) );
+    }
+    else
+    {
+        appendTranscript( _( "[New conversation started. The previous context has been cleared.]\n" ) );
+    }
+
     setStatus( _( "New Codex conversation ready." ) );
     setBusy( false );
 

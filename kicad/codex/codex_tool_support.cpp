@@ -12,6 +12,7 @@
 #include "kichad_protobuf_compat.h"
 #include "kichad_remove_file.h"
 #include "codex_tool_internal.h"
+#include "svg_raster.h"
 #include "board_render_artifact_validator.h"
 #include "board_ps_artifact_validator.h"
 #include "design_script_compiler.h"
@@ -76,6 +77,7 @@
 #include <wx/filename.h>
 #include <wx/image.h>
 #include <wx/stdpaths.h>
+#include <wx/tokenzr.h>
 #include <wx/utils.h>
 #include <wx/wfstream.h>
 #include <wx/xml/xml.h>
@@ -1766,15 +1768,99 @@ bool runNativeFabricationCommand( const wxFileName& aCli,
 }
 
 
-bool writeCroppedPreview( const wxFileName& aRasterized, const wxFileName& aOutput,
-                          std::string& aError )
+bool findExternalTool( const wxString& aName, wxFileName& aExecutable )
 {
+    wxString searchPath;
+    wxString found;
+
+    if( wxGetEnv( wxS( "PATH" ), &searchPath ) && wxFindFileInPath( &found, searchPath, aName ) )
+    {
+        aExecutable = wxFileName( found );
+        return true;
+    }
+
+    // GUI launches on macOS (and desktop launchers elsewhere) carry a minimal PATH that omits
+    // Homebrew, MacPorts, and /usr/local, so look where package managers actually install.
+    std::vector<wxString> candidates = {
+        wxFileName( wxStandardPaths::Get().GetExecutablePath() ).GetPath()
+    };
+    wxString extra;
+
+    if( wxGetEnv( wxS( "KICHAD_TOOL_PATH" ), &extra ) && !extra.IsEmpty() )
+    {
+        for( const wxString& dir : wxSplit( extra, wxPATH_SEP[0] ) )
+            candidates.push_back( dir );
+    }
+
+    for( const char* dir : { "/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin",
+                             "/usr/bin", "/bin", "/snap/bin", "/usr/local/opt/poppler/bin",
+                             "/opt/homebrew/opt/poppler/bin" } )
+        candidates.push_back( wxString::FromUTF8( dir ) );
+
+    for( const wxString& dir : candidates )
+    {
+        wxFileName candidate( dir, aName );
+#ifdef __WXMSW__
+        candidate.SetExt( wxS( "exe" ) );
+#endif
+
+        if( candidate.FileExists() && candidate.IsFileExecutable() )
+        {
+            aExecutable = candidate;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+
+bool rasterizePdfToPng( const wxFileName& pdf, const wxFileName& logs,
+                        const wxFileName& aOutput, std::string& aError, int aPage = 1 )
+{
+    PRIVATE_TEMPORARY_DIRECTORY temporary;
+
+    if( !temporary.Create( "kichad-raster", aError ) )
+        return false;
+
+    wxFileName rasterizerPath;
+
+    if( !findExternalTool( wxS( "pdftoppm" ), rasterizerPath ) )
+    {
+        aError = "the PDF-to-PNG preview rasterizer (poppler's pdftoppm) is not installed in "
+                 "PATH, /opt/homebrew/bin, /usr/local/bin, or KICHAD_TOOL_PATH";
+        return false;
+    }
+
+    wxFileName prefix( wxString::FromUTF8( temporary.Path().string() ),
+                       wxS( "rasterized" ) );
+    prefix.ClearExt();
+    const std::vector<std::string> rasterArguments = {
+        "-png", "-r", "160", "-f", std::to_string( aPage ), "-l", std::to_string( aPage ),
+        "-singlefile", pdf.GetFullPath().ToStdString(), prefix.GetFullPath().ToStdString()
+    };
+
+    if( !runNativeFabricationCommand( rasterizerPath, rasterArguments, logs, 1,
+                                      "preview rasterization", aError ) )
+    {
+        return false;
+    }
+
+    wxFileName rasterized = prefix;
+    rasterized.SetExt( wxS( "png" ) );
+
+    if( !rasterized.FileExists() )
+    {
+        aError = "preview rasterization did not produce a readable PNG";
+        return false;
+    }
+
     // PDF plots retain their entire paper rectangle.  Crop uniform page margins so the model
-    // receives the actual circuit at useful resolution instead of a mostly blank paper image.
+    // receives the actual circuit at useful resolution instead of a mostly blank A4 image.
     wxImage preview;
     bool wrotePreview = false;
 
-    if( preview.LoadFile( aRasterized.GetFullPath(), wxBITMAP_TYPE_PNG ) && preview.IsOk()
+    if( preview.LoadFile( rasterized.GetFullPath(), wxBITMAP_TYPE_PNG ) && preview.IsOk()
         && preview.GetWidth() > 0 && preview.GetHeight() > 0 && preview.GetData() )
     {
         const int width = preview.GetWidth();
@@ -1831,7 +1917,7 @@ bool writeCroppedPreview( const wxFileName& aRasterized, const wxFileName& aOutp
     }
 
     if( !wrotePreview
-        && !wxCopyFile( aRasterized.GetFullPath(), aOutput.GetFullPath(), true ) )
+        && !wxCopyFile( rasterized.GetFullPath(), aOutput.GetFullPath(), true ) )
     {
         aError = "preview rasterization did not produce a readable PNG";
         return false;
@@ -1842,16 +1928,8 @@ bool writeCroppedPreview( const wxFileName& aRasterized, const wxFileName& aOutp
 
 
 bool runNativeKiCadPreview( const std::string& aView, const wxFileName& aInput,
-                            const std::vector<int>& aPages,
-                            const std::vector<wxFileName>& aOutputs,
-                            std::string& aError )
+                            const wxFileName& aOutput, int aPage, std::string& aError )
 {
-    if( aPages.empty() || aPages.size() != aOutputs.size() )
-    {
-        aError = "native preview requires one output for every requested page";
-        return false;
-    }
-
     wxFileName cli;
 
     if( !findNativeKiCadCli( cli ) )
@@ -1868,31 +1946,16 @@ bool runNativeKiCadPreview( const std::string& aView, const wxFileName& aInput,
     wxFileName logs = wxFileName::DirName(
             wxString::FromUTF8( temporary.Path().string() ) );
 
-    for( size_t i = 0; i < aOutputs.size(); ++i )
+    if( aOutput.FileExists() && !KICHAD::RemoveFileWithRetry( aOutput.GetFullPath() ) )
     {
-        if( aPages[i] < 1 || aPages[i] > 1000 )
-        {
-            aError = "native schematic preview page must be between 1 and 1000";
-            return false;
-        }
-
-        if( aOutputs[i].FileExists() && !KICHAD::RemoveFileWithRetry( aOutputs[i].GetFullPath() ) )
-        {
-            aError = "could not replace the prior derived preview";
-            return false;
-        }
+        aError = "could not replace the prior derived preview";
+        return false;
     }
 
     if( aView == "pcb3d" )
     {
-        if( aOutputs.size() != 1 )
-        {
-            aError = "PCB previews require exactly one output";
-            return false;
-        }
-
         const std::vector<std::string> arguments = {
-            "pcb", "render", "--output", aOutputs.front().GetFullPath().ToStdString(),
+            "pcb", "render", "--output", aOutput.GetFullPath().ToStdString(),
             "--width", "1600", "--height", "1200", "--side", "top",
             "--background", "opaque", "--quality", "high", "--preset",
             "follow_plot_settings", aInput.GetFullPath().ToStdString()
@@ -1901,7 +1964,7 @@ bool runNativeKiCadPreview( const std::string& aView, const wxFileName& aInput,
         if( !runNativeFabricationCommand( cli, arguments, logs, 0, "PCB preview", aError ) )
             return false;
 
-        if( !aOutputs.front().FileExists() )
+        if( !aOutput.FileExists() )
         {
             aError = "native KiCad did not produce the requested PCB preview";
             return false;
@@ -1910,53 +1973,42 @@ bool runNativeKiCadPreview( const std::string& aView, const wxFileName& aInput,
         return true;
     }
 
-    wxFileName pdf( wxString::FromUTF8( temporary.Path().string() ),
-                    wxS( "preview.pdf" ) );
+    // 2D views: plot SVG with kicad-cli and rasterize it in-process, so no PDF rasterizer or
+    // other external tool is needed.
+    wxFileName svgDirectory = wxFileName::DirName(
+            wxString::FromUTF8( temporary.Path().string() ) );
+    svgDirectory.AppendDir( wxS( "svg" ) );
+
+    if( !wxFileName::Mkdir( svgDirectory.GetFullPath(), 0700, wxPATH_MKDIR_FULL ) )
+    {
+        aError = "could not create the preview staging directory";
+        return false;
+    }
+
+    wxFileName boardSvg( svgDirectory.GetFullPath(), wxS( "board.svg" ) );
     std::vector<std::string> arguments;
 
     if( aView == "schematic" )
     {
-        std::string pages;
-
-        for( int page : aPages )
-        {
-            if( !pages.empty() )
-                pages += ',';
-
-            pages += std::to_string( page );
-        }
-
-        arguments = { "sch", "export", "pdf", "--output",
-                      pdf.GetFullPath().ToStdString(), "--exclude-drawing-sheet",
-                      "--pages", pages,
+        arguments = { "sch", "export", "svg", "--output",
+                      svgDirectory.GetFullPath().ToStdString(), "--exclude-drawing-sheet",
+                      "--pages", std::to_string( aPage ),
                       aInput.GetFullPath().ToStdString() };
     }
     else if( aView == "pcb2d" )
     {
-        if( aOutputs.size() != 1 )
-        {
-            aError = "PCB previews require exactly one output";
-            return false;
-        }
-
-        arguments = { "pcb", "export", "pdf", "--output",
-                      pdf.GetFullPath().ToStdString(), "--layers",
+        arguments = { "pcb", "export", "svg", "--output",
+                      boardSvg.GetFullPath().ToStdString(), "--layers",
                       "F.Cu,B.Cu,F.SilkS,B.SilkS,Edge.Cuts", "--mode-single",
-                      "--scale", "0", "--exclude-value", "--no-property-popups",
+                      "--page-size-mode", "2", "--exclude-drawing-sheet",
                       aInput.GetFullPath().ToStdString() };
     }
     else if( aView == "pcblayout" )
     {
-        if( aOutputs.size() != 1 )
-        {
-            aError = "PCB previews require exactly one output";
-            return false;
-        }
-
-        arguments = { "pcb", "export", "pdf", "--output",
-                      pdf.GetFullPath().ToStdString(), "--layers",
+        arguments = { "pcb", "export", "svg", "--output",
+                      boardSvg.GetFullPath().ToStdString(), "--layers",
                       "F.Cu,B.Cu,F.SilkS,B.SilkS,F.Fab,B.Fab,F.CrtYd,B.CrtYd,Edge.Cuts",
-                      "--mode-single", "--scale", "0", "--no-property-popups",
+                      "--mode-single", "--page-size-mode", "2", "--exclude-drawing-sheet",
                       aInput.GetFullPath().ToStdString() };
     }
     else
@@ -1965,70 +2017,104 @@ bool runNativeKiCadPreview( const std::string& aView, const wxFileName& aInput,
         return false;
     }
 
-    if( !runNativeFabricationCommand( cli, arguments, logs, 0, aView + " preview", aError )
-        || !pdf.FileExists() )
-    {
-        if( aError.empty() )
-            aError = "native KiCad did not produce the preview PDF";
-
+    if( !runNativeFabricationCommand( cli, arguments, logs, 0, aView + " preview", aError ) )
         return false;
-    }
 
-    wxString executableSearchPath;
-    wxString rasterizer;
+    wxFileName svg = boardSvg;
 
-    if( !wxGetEnv( wxS( "PATH" ), &executableSearchPath )
-        || !wxFindFileInPath( &rasterizer, executableSearchPath, wxS( "pdftoppm" ) ) )
+    if( aView == "schematic" )
     {
-        aError = "the PDF-to-PNG preview rasterizer is unavailable";
-        return false;
-    }
+        // The schematic exporter names the file after the sheet; take the single SVG produced.
+        wxArrayString produced;
+        wxDir::GetAllFiles( svgDirectory.GetFullPath(), &produced, wxS( "*.svg" ), wxDIR_FILES );
 
-    wxFileName rasterizerPath( rasterizer );
-    wxFileName prefix( wxString::FromUTF8( temporary.Path().string() ),
-                       wxS( "rasterized" ) );
-    prefix.ClearExt();
-    std::vector<std::string> rasterArguments = { "-png", "-r", "160" };
-
-    if( aOutputs.size() == 1 )
-        rasterArguments.emplace_back( "-singlefile" );
-
-    rasterArguments.emplace_back( pdf.GetFullPath().ToStdString() );
-    rasterArguments.emplace_back( prefix.GetFullPath().ToStdString() );
-
-    if( !runNativeFabricationCommand( rasterizerPath, rasterArguments, logs, 1,
-                                      "preview rasterization", aError ) )
-    {
-        return false;
-    }
-
-    for( size_t i = 0; i < aOutputs.size(); ++i )
-    {
-        wxFileName rasterized = prefix;
-
-        if( aOutputs.size() == 1 )
+        if( produced.empty() )
         {
-            rasterized.SetExt( wxS( "png" ) );
-        }
-        else
-        {
-            rasterized.SetFullName( prefix.GetName() + wxString::Format( "-%zu.png", i + 1 ) );
-        }
-
-        if( !rasterized.FileExists()
-            || !writeCroppedPreview( rasterized, aOutputs[i], aError ) )
-        {
-            if( aError.empty() )
-                aError = "preview rasterization did not produce every requested page";
-
-            for( const wxFileName& output : aOutputs )
-            {
-                if( output.FileExists() )
-                    KICHAD::RemoveFileWithRetry( output.GetFullPath() );
-            }
-
+            aError = "native KiCad did not produce the schematic preview SVG";
             return false;
         }
+
+        produced.Sort();
+        svg = wxFileName( produced.front() );
+    }
+
+    if( !svg.FileExists() )
+    {
+        aError = "native KiCad did not produce the preview SVG";
+        return false;
+    }
+
+    return KICHAD::SVG_RASTER::RasterizeSvgFile( svg, aOutput, 2000, aError );
+}
+
+
+bool runNativeKiCadPdf( const std::string& aKind, const wxFileName& aInput,
+                        const wxFileName& aOutput, const std::string& aLayers,
+                        std::string& aError )
+{
+    wxFileName cli;
+
+    if( !findNativeKiCadCli( cli ) )
+    {
+        aError = "the sibling kicad-cli PDF backend is unavailable";
+        return false;
+    }
+
+    PRIVATE_TEMPORARY_DIRECTORY temporary;
+
+    if( !temporary.Create( "kichad-pdf", aError ) )
+        return false;
+
+    wxFileName logs = wxFileName::DirName(
+            wxString::FromUTF8( temporary.Path().string() ) );
+
+    // Plot into the private directory first so a failed or partial export never leaves a
+    // truncated document at the requested project path.
+    wxFileName staged( wxString::FromUTF8( temporary.Path().string() ),
+                       wxS( "document.pdf" ) );
+    std::vector<std::string> arguments;
+
+    if( aKind == "schematic" )
+    {
+        // Full hierarchy, drawing sheet and colours retained; property popups excluded so
+        // the document has no embedded scripted actions.
+        arguments = { "sch", "export", "pdf", "--output",
+                      staged.GetFullPath().ToStdString(),
+                      "--exclude-pdf-property-popups",
+                      aInput.GetFullPath().ToStdString() };
+    }
+    else if( aKind == "pcb" )
+    {
+        arguments = { "pcb", "export", "pdf", "--output",
+                      staged.GetFullPath().ToStdString(), "--layers", aLayers,
+                      "--mode-multipage", "--include-border-title", "--check-zones",
+                      "--no-property-popups", aInput.GetFullPath().ToStdString() };
+    }
+    else
+    {
+        aError = "unsupported native PDF document kind";
+        return false;
+    }
+
+    if( !runNativeFabricationCommand( cli, arguments, logs, 0, aKind + " PDF", aError )
+        || !staged.FileExists() )
+    {
+        if( aError.empty() )
+            aError = "native KiCad did not produce the requested PDF";
+
+        return false;
+    }
+
+    if( aOutput.FileExists() && !KICHAD::RemoveFileWithRetry( aOutput.GetFullPath() ) )
+    {
+        aError = "could not replace the prior PDF document";
+        return false;
+    }
+
+    if( !wxCopyFile( staged.GetFullPath(), aOutput.GetFullPath(), true ) )
+    {
+        aError = "could not install the PDF document into the project";
+        return false;
     }
 
     return true;
@@ -2280,6 +2366,71 @@ bool runNativeKiCadFabrication( const wxFileName& aBoard,
 }
 
 
+// Every fitted physical component must carry a datasheet conformance record: the agent
+// verifies pinout and application-circuit support against the exact part's datasheet
+// and records it.  Both production fabrication and the external place-and-route handoff
+// are blocked without that evidence.
+JSON datasheetConformanceIssues( const JSON& aIr )
+{
+    JSON issues = JSON::array();
+    std::map<std::string, const JSON*> conformanceRecords;
+
+    if( aIr.contains( "conformance" ) && aIr["conformance"].is_array() )
+    {
+        for( const JSON& record : aIr["conformance"] )
+            conformanceRecords[record.value( "component", "" )] = &record;
+    }
+
+    if( !aIr.contains( "schematic" ) || !aIr["schematic"].contains( "components" ) )
+        return issues;
+
+    for( const JSON& component : aIr.at( "schematic" ).at( "components" ) )
+    {
+        const std::string reference = component.value( "reference", "" );
+
+        if( reference.empty() || component.value( "dnp", false )
+            || !component.contains( "footprint" ) || component["footprint"].is_null() )
+        {
+            continue;
+        }
+
+        const auto record = conformanceRecords.find( reference );
+
+        if( record == conformanceRecords.end() )
+        {
+            issues.push_back(
+                    { { "type", "missing_datasheet_conformance" },
+                      { "severity", "error" },
+                      { "description",
+                        "Fitted component " + reference
+                                + " has no datasheet conformance record; verify its pinout "
+                                  "and application circuit against the exact part's datasheet "
+                                  "and record a (conformance ...) statement" },
+                      { "component", reference } } );
+        }
+        else
+        {
+            for( const JSON& deviation :
+                 record->second->value( "deviations", JSON::array() ) )
+            {
+                if( !deviation.is_string() )
+                    continue;
+
+                issues.push_back(
+                        { { "type", "datasheet_conformance_deviation" },
+                          { "severity", "warning" },
+                          { "description",
+                            "Component " + reference + " deviates from its datasheet: "
+                                    + deviation.get<std::string>() },
+                          { "component", reference } } );
+            }
+        }
+    }
+
+    return issues;
+}
+
+
 JSON buildFabricationPlan( const JSON& aIr, const std::string& aFileStem )
 {
     static constexpr const char* CHECK_ORDER[] = {
@@ -2378,57 +2529,37 @@ JSON buildFabricationPlan( const JSON& aIr, const std::string& aFileStem )
                     "local connections whose generated wires stay clear of symbols." } } );
     }
 
-    // Every fitted physical component must carry a datasheet conformance record: the agent
-    // verifies pinout and application-circuit support against the exact part's datasheet
-    // and records it; production fabrication is blocked without that evidence.
-    std::map<std::string, const JSON*> conformanceRecords;
+    for( const JSON& issue : datasheetConformanceIssues( aIr ) )
+        issues.push_back( issue );
 
-    if( aIr.contains( "conformance" ) && aIr["conformance"].is_array() )
-    {
-        for( const JSON& record : aIr["conformance"] )
-            conformanceRecords[record.value( "component", "" )] = &record;
-    }
-
+    // Surface-mount passives below 0402 imperial (0201, 01005) are forbidden by user
+    // rule: too small for the intended assembly process.  KiCad passive footprints
+    // carry the imperial size as a name token (e.g. R_0201_0603Metric).
     for( const JSON& component : aIr.at( "schematic" ).at( "components" ) )
     {
-        const std::string reference = component.value( "reference", "" );
-
-        if( reference.empty() || component.value( "dnp", false )
-            || !component.contains( "footprint" ) || component["footprint"].is_null() )
+        if( component.value( "dnp", false ) || !component.contains( "footprint" )
+            || !component["footprint"].is_string() )
         {
             continue;
         }
 
-        const auto record = conformanceRecords.find( reference );
+        const std::string footprint = component["footprint"].get<std::string>();
+        const bool undersized = footprint.find( "_01005" ) != std::string::npos
+                                || footprint.find( "_0201_" ) != std::string::npos
+                                || footprint.ends_with( "_0201" );
 
-        if( record == conformanceRecords.end() )
+        if( undersized )
         {
             issues.push_back(
-                    { { "type", "missing_datasheet_conformance" },
+                    { { "type", "undersized_passive" },
                       { "severity", "error" },
                       { "description",
-                        "Fitted component " + reference
-                                + " has no datasheet conformance record; verify its pinout "
-                                  "and application circuit against the exact part's datasheet "
-                                  "and record a (conformance ...) statement" },
-                      { "component", reference } } );
-        }
-        else
-        {
-            for( const JSON& deviation :
-                 record->second->value( "deviations", JSON::array() ) )
-            {
-                if( !deviation.is_string() )
-                    continue;
-
-                issues.push_back(
-                        { { "type", "datasheet_conformance_deviation" },
-                          { "severity", "warning" },
-                          { "description",
-                            "Component " + reference + " deviates from its datasheet: "
-                                    + deviation.get<std::string>() },
-                          { "component", reference } } );
-            }
+                        "Component " + component.value( "reference", std::string( "?" ) )
+                                + " uses footprint " + footprint
+                                + "; surface-mount passives smaller than 0402 imperial "
+                                  "(0201, 01005) are not allowed - choose an 0402 or "
+                                  "larger package" },
+                      { "component", component.value( "reference", std::string( "?" ) ) } } );
         }
     }
 
@@ -7291,23 +7422,43 @@ bool executePcbActions( const KICHAD_IPC_CLIENT& aClient, const KICHAD_IPC_TARGE
         kiapi::common::commands::DeleteItemsResponse deleted;
 
         if( !response.message().UnpackTo( &deleted )
-            || deleted.status() != kiapi::common::types::IRS_OK
-            || deleted.deleted_items_size() != static_cast<int>( end - begin ) )
+            || deleted.status() != kiapi::common::types::IRS_OK )
         {
             aError = "KiCad returned an invalid delete-items response";
             return false;
         }
 
+        // KiCad reports deletion results keyed by UUID in its own (sorted) order, not in
+        // request order, so match them by identity.  An item that is already absent from the
+        // live board is the desired end state, not a failure: the design is converging on the
+        // requested content regardless of what the editor held before.
+        std::map<std::string, kiapi::common::commands::ItemDeletionStatus> results;
+
         for( int i = 0; i < deleted.deleted_items_size(); ++i )
+            results[deleted.deleted_items( i ).id().value()] = deleted.deleted_items( i ).status();
+
+        for( size_t i = begin; i < end; ++i )
         {
-            if( deleted.deleted_items( i ).status() != kiapi::common::commands::IDS_OK
-                || deleted.deleted_items( i ).id().value()
-                           != deletes[begin + static_cast<size_t>( i )]
-                                      ->at( "itemId" ).get<std::string>() )
+            const std::string itemId = deletes[i]->at( "itemId" ).get<std::string>();
+            const auto        result = results.find( itemId );
+
+            if( result == results.end() )
             {
-                aError = "KiCad rejected or changed a managed PCB deletion";
+                aError = "KiCad did not report the deletion of managed PCB item " + itemId;
                 return false;
             }
+
+            if( result->second == kiapi::common::commands::IDS_OK
+                || result->second == kiapi::common::commands::IDS_NONEXISTENT )
+                continue;
+
+            aError = "KiCad refused to delete managed PCB item " + itemId + " ("
+                     + deletes[i]->value( "itemType", "item" ) + " "
+                     + deletes[i]->value( "logicalId", "" ) + "): "
+                     + ( result->second == kiapi::common::commands::IDS_IMMUTABLE
+                                 ? "the item is immutable through the API"
+                                 : "deletion status " + std::to_string( result->second ) );
+            return false;
         }
     }
 
@@ -7709,10 +7860,167 @@ bool KICHAD::CODEX_TOOLS::RunNativeKiCadCheck(
 
 bool KICHAD::CODEX_TOOLS::RunNativeKiCadPreview(
         const std::string& aView, const wxFileName& aInput,
-        const std::vector<int>& aPages, const std::vector<wxFileName>& aOutputs,
-        std::string& aError )
+        const wxFileName& aOutput, int aPage, std::string& aError )
 {
-    return runNativeKiCadPreview( aView, aInput, aPages, aOutputs, aError );
+    return runNativeKiCadPreview( aView, aInput, aOutput, aPage, aError );
+}
+
+
+/**
+ * Resolve a project-relative PDF destination that may not exist yet.  The deepest existing
+ * ancestor is canonicalized before the project-root check so a symlinked directory cannot
+ * redirect the document outside the project; the leaf must carry a .pdf extension so the tool
+ * can never overwrite a design source.
+ */
+bool KICHAD::CODEX_TOOLS::ResolveProjectPdfDestination( const wxString& aProjectPath,
+                                                         const std::string& aRelativePath,
+                                                         wxFileName& aResolved,
+                                                         std::string& aRelativeResolved,
+                                                         std::string& aError )
+{
+    return ResolveProjectDestination( aProjectPath, aRelativePath, "pdf", aResolved,
+                                      aRelativeResolved, aError );
+}
+
+
+bool KICHAD::CODEX_TOOLS::ResolveProjectDestination( const wxString& aProjectPath,
+                                                      const std::string& aRelativePath,
+                                                      const std::string& aExtension,
+                                                      wxFileName& aResolved,
+                                                      std::string& aRelativeResolved,
+                                                      std::string& aError )
+{
+    wxString   relative = wxString::FromUTF8( aRelativePath );
+    wxFileName candidate( relative );
+
+    if( aRelativePath.empty() || aRelativePath.size() > 4096
+        || aRelativePath.find( '\0' ) != std::string::npos || candidate.IsAbsolute()
+        || candidate.GetFullName().IsEmpty() )
+    {
+        aError = "output must be a project-relative file path";
+        return false;
+    }
+
+    if( candidate.GetExt().Lower() != wxString::FromUTF8( aExtension ) )
+    {
+        aError = "output must end in ." + aExtension;
+        return false;
+    }
+
+    wxFileName root = wxFileName::DirName( aProjectPath );
+    root.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+
+    if( !canonicalizeExisting( root, true ) )
+    {
+        aError = "active project path could not be resolved";
+        return false;
+    }
+
+    candidate.MakeAbsolute( root.GetFullPath() );
+    candidate.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+
+    // Walk up to the deepest existing ancestor and canonicalize it; the remaining
+    // components are created below it, so they cannot be symlinks yet.
+    wxFileName ancestor = wxFileName::DirName( candidate.GetPath() );
+    std::vector<wxString> pending;
+
+    while( ancestor.GetDirCount() > 0 && !ancestor.DirExists() )
+    {
+        pending.insert( pending.begin(), ancestor.GetDirs().Last() );
+        ancestor.RemoveLastDir();
+    }
+
+    if( !canonicalizeExisting( ancestor, true ) )
+    {
+        aError = "output directory could not be resolved";
+        return false;
+    }
+
+    wxString ancestorPath = ancestor.GetPathWithSep();
+    wxString rootPath = root.GetPathWithSep();
+
+#ifdef __WXMSW__
+    ancestorPath.MakeLower();
+    rootPath.MakeLower();
+#endif
+
+    if( !ancestorPath.StartsWith( rootPath ) )
+    {
+        aError = "output resolves outside the active project";
+        return false;
+    }
+
+    for( const wxString& dir : pending )
+        ancestor.AppendDir( dir );
+
+    wxFileName resolved( ancestor.GetPath(), candidate.GetFullName() );
+
+    if( resolved.FileExists() && aExtension == "pdf" )
+    {
+        wxFile existing( resolved.GetFullPath(), wxFile::read );
+        char signature[5] = { 0 };
+
+        if( !existing.IsOpened() || existing.Read( signature, 5 ) != 5
+            || std::string_view( signature, 5 ) != "%PDF-" )
+        {
+            aError = "output already exists and is not a PDF document";
+            return false;
+        }
+    }
+
+    wxFileName relativeName( resolved );
+    relativeName.MakeRelativeTo( root.GetFullPath() );
+    aRelativeResolved = relativeName.GetFullPath( wxPATH_UNIX ).ToStdString();
+    aResolved = resolved;
+    return true;
+}
+
+
+
+
+bool KICHAD::CODEX_TOOLS::FindExternalTool( const wxString& aName, wxFileName& aExecutable )
+{
+    return findExternalTool( aName, aExecutable );
+}
+
+
+bool KICHAD::CODEX_TOOLS::RunExternalCommand( const wxFileName& aExecutable,
+                                              const std::vector<std::string>& aArguments,
+                                              const wxFileName& aLogDirectory, size_t aIndex,
+                                              const std::string& aKind, std::string& aError )
+{
+    return runNativeFabricationCommand( aExecutable, aArguments, aLogDirectory, aIndex, aKind,
+                                        aError );
+}
+
+
+bool KICHAD::CODEX_TOOLS::RasterizePdfPreview( const wxFileName& aPdf,
+                                               const wxFileName& aOutput,
+                                               std::string& aError, int aPage )
+{
+    PRIVATE_TEMPORARY_DIRECTORY temporary;
+
+    if( !temporary.Create( "kichad-raster-logs", aError ) )
+        return false;
+
+    wxFileName logs = wxFileName::DirName(
+            wxString::FromUTF8( temporary.Path().string() ) );
+
+    if( aOutput.FileExists() && !KICHAD::RemoveFileWithRetry( aOutput.GetFullPath() ) )
+    {
+        aError = "could not replace the prior derived preview";
+        return false;
+    }
+
+    return rasterizePdfToPng( aPdf, logs, aOutput, aError, aPage );
+}
+
+
+bool KICHAD::CODEX_TOOLS::RunNativeKiCadPdf(
+        const std::string& aKind, const wxFileName& aInput, const wxFileName& aOutput,
+        const std::string& aLayers, std::string& aError )
+{
+    return runNativeKiCadPdf( aKind, aInput, aOutput, aLayers, aError );
 }
 
 
@@ -7748,6 +8056,12 @@ bool KICHAD::CODEX_TOOLS::BuildNativeNetlistValidationPlan(
 {
     return buildNativeNetlistValidationPlan( aIr, aResolvedSymbols, aFileStem,
                                              aPlan, aError );
+}
+
+
+nlohmann::json KICHAD::CODEX_TOOLS::DatasheetConformanceIssues( const nlohmann::json& aIr )
+{
+    return datasheetConformanceIssues( aIr );
 }
 
 

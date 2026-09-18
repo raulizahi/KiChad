@@ -589,6 +589,13 @@ void SCH_EDIT_FRAME::OnCrossProbeFlashTimer( wxTimerEvent& aEvent )
 
 SCH_EDIT_FRAME::~SCH_EDIT_FRAME()
 {
+#ifdef KICAD_IPC_API
+    // Normally done in doCloseWindow(), but a frame destroyed without the close path
+    // (e.g. programmatic teardown) must not leave a dangling handler registered: a
+    // queued API request dispatched afterwards is a use-after-free.
+    Pgm().GetApiServer().DeregisterHandler( m_apiHandler.get() );
+#endif
+
     m_hierarchy->Unbind( wxEVT_SIZE, &SCH_EDIT_FRAME::OnResizeHierarchyNavigator, this );
 
     // Ensure m_canvasType is up to date, to save it in config
