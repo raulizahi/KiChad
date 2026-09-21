@@ -1045,6 +1045,74 @@ BOOST_AUTO_TEST_CASE( VerifiesSingleRepresentationSourcingEvidence )
     BOOST_CHECK_EQUAL( cleanData["maxAgeDays"].get<int>(), 7 );
     BOOST_CHECK_EQUAL( cleanData["verifiedOn"].get<std::string>(), today );
 
+    // A distributor outside DigiKey/Mouser/Newark fails the gate until the user's approval is
+    // recorded in the KDS, and then stays visible as a warning rather than being forgotten.
+    const auto holderRecord = [&]( const std::string& aException )
+    {
+        return "  (source H1\n"
+               "    (manufacturer \"M12 Lenses Inc.\")\n"
+               "    (mpn \"PT-LH031M\")\n"
+               "    (datasheet \"https://vendor.example.test/PT-LH031M.pdf\")\n"
+               "    (lifecycle active)\n"
+               "    (supplier \"M12 Lenses Inc. - manufacturer direct\")\n"
+               "    (sku \"PT-LH031M\")\n"
+               "    (product_url \"https://vendor.example.test/pt-lh031m\")\n"
+               "    (available 40)\n"
+               "    (verified_on " + today + ")\n"
+               "    (quantity 2)" + aException + ")\n";
+    };
+    const std::string holderPrefix =
+            "(kichad_design\n"
+            "  (version 1)\n"
+            "  (project sourcing)\n"
+            "  (component H1 (symbol \"Mechanical:Holder\") (value \"PT-LH031M\") "
+            "(footprint \"Mechanical:PT_LH031M\"))\n";
+
+    writeSidecar( wxS( "holder-unapproved.kicad_kds" ),
+                  holderPrefix + holderRecord( "" ) + suffix );
+    JSON unapproved = registry.Handle( "verify", { { "operation", "sourcing" },
+                                                    { "path", "holder-unapproved.kicad_kds" } } );
+    BOOST_REQUIRE_MESSAGE( unapproved.at( "success" ).get<bool>(), unapproved.dump() );
+    JSON unapprovedData = envelope( unapproved )["data"];
+    BOOST_CHECK( !unapprovedData["clean"].get<bool>() );
+    BOOST_CHECK_EQUAL( unapprovedData["counts"]["errors"].get<int>(), 1 );
+    BOOST_CHECK_EQUAL( unapprovedData["violations"][0]["type"].get<std::string>(),
+                       "unapproved_distributor" );
+
+    writeSidecar( wxS( "holder-approved.kicad_kds" ),
+                  holderPrefix
+                          + holderRecord( "\n    (distributor_exception \"ok, please find "
+                                          "another distributor just for the m12 lens holder with "
+                                          "stock.\")\n"
+                                          "    (distributor_exception_approved_on 2026-09-17)" )
+                          + suffix );
+    JSON approved = registry.Handle( "verify", { { "operation", "sourcing" },
+                                                  { "path", "holder-approved.kicad_kds" } } );
+    BOOST_REQUIRE_MESSAGE( approved.at( "success" ).get<bool>(), approved.dump() );
+    JSON approvedData = envelope( approved )["data"];
+    BOOST_CHECK_MESSAGE( approvedData["clean"].get<bool>(), approvedData.dump() );
+    BOOST_CHECK_EQUAL( approvedData["counts"]["total"].get<int>(), 0 );
+    BOOST_CHECK_EQUAL( approvedData["sourcing"]["distributorExceptionCount"].get<int>(), 1 );
+    BOOST_REQUIRE_EQUAL( approvedData["sourcing"]["distributorExceptions"].size(), 1 );
+    const JSON& exception = approvedData["sourcing"]["distributorExceptions"][0];
+    BOOST_CHECK_EQUAL( exception["component"].get<std::string>(), "H1" );
+    BOOST_CHECK_EQUAL( exception["approvedOn"].get<std::string>(), "2026-09-17" );
+    BOOST_CHECK_NE( exception["approval"].get<std::string>().find( "m12 lens holder" ),
+                    std::string::npos );
+
+    // Half a record is not an approval.
+    writeSidecar( wxS( "holder-half.kicad_kds" ),
+                  holderPrefix
+                          + holderRecord( "\n    (distributor_exception \"approved verbally\")" )
+                          + suffix );
+    JSON half = registry.Handle( "design", { { "operation", "compile" },
+                                              { "path", "holder-half.kicad_kds" } } );
+    BOOST_REQUIRE_MESSAGE( half.at( "success" ).get<bool>(), half.dump() );
+    JSON halfData = envelope( half )["data"];
+    BOOST_CHECK_MESSAGE( halfData.dump().find( "incomplete_distributor_exception" )
+                                 != std::string::npos,
+                         halfData.dump() );
+
     const std::string missing =
             prefix
             + "  (component R2 (symbol \"Device:R\") (value \"1k\") "

@@ -5356,7 +5356,10 @@ JSON compileSource( const DOCUMENT& aDocument, size_t aNode,
     JSON source = { { "component", reference } };
     const std::set<std::string> allowed = {
         "manufacturer", "mpn",       "datasheet", "lifecycle", "supplier", "sku",
-        "product_url",  "available", "verified_on", "quantity", "unit_price", "notes"
+        "product_url",  "available", "verified_on", "quantity", "unit_price", "notes",
+        // A distributor outside the approved set is allowed only with the user's recorded
+        // approval: their own words plus the date they gave it.
+        "distributor_exception", "distributor_exception_approved_on"
     };
     std::set<std::string> fields;
 
@@ -5468,6 +5471,10 @@ JSON compileSource( const DOCUMENT& aDocument, size_t aNode,
             valid = boundedString( value, 128 );
         else if( head == "notes" )
             valid = boundedString( value, 2048 );
+        else if( head == "distributor_exception" )
+            valid = boundedString( value, 2048 );
+        else if( head == "distributor_exception_approved_on" )
+            valid = isoDate( value );
 
         if( !valid )
         {
@@ -5483,6 +5490,15 @@ JSON compileSource( const DOCUMENT& aDocument, size_t aNode,
     {
         diagnostic( aResult, "warning", "incomplete_source",
                     "source for " + reference + " has no verified manufacturer and MPN pair" );
+    }
+
+    if( source.contains( "distributor_exception" )
+        != source.contains( "distributor_exception_approved_on" ) )
+    {
+        diagnostic( aResult, "error", "incomplete_distributor_exception",
+                    "source for " + reference
+                            + " must record both the user's distributor approval and the date "
+                              "they approved it" );
     }
 
     aReferencedComponents.emplace_back( reference );

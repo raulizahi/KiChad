@@ -345,7 +345,9 @@ A production-complete record for every footprint-bearing component contains:
   (verified_on 2026-07-19)
   (quantity 1)
   (unit_price "1.23 USD")
-  (notes "Optional bounded evidence note"))
+  (notes "Optional bounded evidence note")
+  (distributor_exception "User's own words approving this distributor")
+  (distributor_exception_approved_on 2026-09-17))
 ```
 
 `datasheet` and `product_url` must be HTTPS URLs. `lifecycle` is `active`, `nrnd`,
@@ -354,6 +356,15 @@ reported by the named supplier, `quantity` is the positive design quantity, and 
 real `YYYY-MM-DD` calendar date. `unit_price` and `notes` are optional; the identity, URLs,
 lifecycle, supplier/SKU, stock, date, and quantity are required by the production gate. A
 footprintless virtual or power component does not require a distributor record.
+
+Stock must come from DigiKey, Mouser, or Newark unless the user approves another distributor.
+Their approval is recorded on that component's source as `distributor_exception` (their own words)
+with `distributor_exception_approved_on` (the date they gave it); either without the other is a
+compile error.  With both present the sourcing gate stops failing with
+`unapproved_distributor` and instead records the exception under `sourcing.distributorExceptions`
+with the supplier, the date, and the user's words.  The gate stays clean, so release is not
+blocked, and the fabrication manifest repeats the exception, so it keeps appearing in every report
+rather than being silently forgotten.
 
 The native `verify` tool's `sourcing` operation compiles the exact `.kicad_kds` source and returns
 complete error/warning counts plus bounded pageable issues such as `missing_source`,
