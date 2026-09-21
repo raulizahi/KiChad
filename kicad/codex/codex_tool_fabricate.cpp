@@ -399,6 +399,13 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleFabricate(
                          { "waiversPresent", waivers },
                          { "counts", data.value( "counts", JSON::object() ) } };
 
+        // User-approved distributor exceptions are clean, but the release must still name them.
+        if( kind == std::string_view( "sourcing" ) && data.contains( "sourcing" )
+            && data["sourcing"].value( "distributorExceptionCount", 0 ) > 0 )
+        {
+            checks[kind]["distributorExceptions"] = data["sourcing"]["distributorExceptions"];
+        }
+
         if( data.contains( "schema" ) )
             checks[kind]["schema"] = data["schema"];
 

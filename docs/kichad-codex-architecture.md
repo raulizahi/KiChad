@@ -66,6 +66,14 @@ Mermaid renderer is involved.  The PDF lands at a project-confined `.pdf` destin
 (`documentation/<name>.pdf` by default) with the Mermaid text saved beside it as `<stem>.mmd`,
 and the response attaches a `pdftoppm` PNG preview when that rasterizer is available so the
 agent can review the drawing it produced.
+The sourcing gate requires DigiKey, Mouser, or Newark stock evidence unless the user approves
+another distributor.  That approval is recorded on the component's KDS source as
+`distributor_exception` (the user's own words) and `distributor_exception_approved_on` (the date),
+either without the other being a compile error.  With both present the gate stops failing and
+instead reports the exception under `sourcing.distributorExceptions`, which keeps the release clean
+while the fabrication manifest repeats supplier, date, and approval, so an approved deviation is
+never silently forgotten and never has to be approved twice.
+
 `document` is the agent's only route to PDF content, because the owned Codex process has no shell,
 no file tool, and no chat attachments.  Reading is native: `pdf_text_document.cpp` indexes objects
 by scanning for `N G obj` (so damaged cross-reference tables still open), decodes Flate, LZW,

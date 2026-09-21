@@ -423,6 +423,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleSourcingVerify(
     }
 
     JSON issues = JSON::array();
+    JSON distributorExceptions = JSON::array();
     std::set<std::string> componentsWithIssues;
     const auto addIssue = [&]( const std::string& aComponent, const std::string& aType,
                                const std::string& aSeverity, const std::string& aDescription,
@@ -509,10 +510,31 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleSourcingVerify(
 
         if( supplierKey != "digikey" && supplierKey != "mouser" && supplierKey != "newark" )
         {
-            addIssue( reference, "unapproved_distributor", "error",
-                      "Sourcing evidence must come from DigiKey, Mouser, or Newark unless the "
-                      "user explicitly approves an exception",
-                      { { "supplier", record["supplier"] } } );
+            // The user can approve another distributor; the approval lives in the KDS with the
+            // date it was given, so the gate can honour it and the report keeps showing it.
+            const bool approved = record.contains( "distributor_exception" )
+                                  && record.contains( "distributor_exception_approved_on" );
+
+            if( approved )
+            {
+                // Recorded evidence, not an unresolved issue: the gate stays clean so release
+                // is not blocked, and every report and release manifest keeps naming the
+                // exception, the date, and the user's words.
+                distributorExceptions.push_back(
+                        { { "component", reference },
+                          { "supplier", record["supplier"] },
+                          { "approvedOn", record["distributor_exception_approved_on"] },
+                          { "approval", record["distributor_exception"] } } );
+            }
+            else
+            {
+                addIssue( reference, "unapproved_distributor", "error",
+                          "Sourcing evidence must come from DigiKey, Mouser, or Newark unless "
+                          "the user approves an exception recorded in KDS as "
+                          "(distributor_exception \"...\") with "
+                          "(distributor_exception_approved_on YYYY-MM-DD)",
+                          { { "supplier", record["supplier"] } } );
+            }
         }
 
         const std::string verifiedOn = record["verified_on"].get<std::string>();
@@ -596,7 +618,9 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleSourcingVerify(
         { "sourcing",
           { { "requiredComponents", requiredComponents.size() },
             { "sourceRecords", records.size() },
-            { "completeComponents", completeComponents } } },
+            { "completeComponents", completeComponents },
+            { "distributorExceptionCount", distributorExceptions.size() },
+            { "distributorExceptions", std::move( distributorExceptions ) } } },
         { "ignoredChecksCount", 0 },
         { "ignoredChecks", JSON::array() },
         { "ignoredChecksTruncated", false },
