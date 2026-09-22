@@ -724,7 +724,8 @@ bool stageSingleBoardInput( const wxFileName& aProjectDirectory, const LAYOUT_TA
              more; more = source.GetNext( &entry ) )
         {
             // Derived KiChad state is not design input.
-            if( entry == wxS( ".kichad" ) || entry == wxS( ".history" ) || entry == wxS( ".git" ) )
+            if( entry == wxS( "kichad" ) || entry == wxS( ".kichad" )
+                || entry == wxS( ".history" ) || entry == wxS( ".git" ) )
                 continue;
 
             wxFileName child = wxFileName::DirName( aFrom.GetFullPath() );
@@ -878,7 +879,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
         // Preserve the staged (unrouted) board so layout.revert can restore it if the
         // routed result is rejected.
         wxFileName backupDir = wxFileName::DirName( projectDirectory.GetFullPath() );
-        backupDir.AppendDir( wxS( ".kichad" ) );
+        backupDir.AppendDir( wxS( "kichad" ) );
         backupDir.AppendDir( wxS( "pre-layout" ) );
 
         if( !backupDir.DirExists()
@@ -920,8 +921,20 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
         }
 
         wxFileName backupDir = wxFileName::DirName( projectDirectory.GetFullPath() );
-        backupDir.AppendDir( wxS( ".kichad" ) );
+        backupDir.AppendDir( wxS( "kichad" ) );
         backupDir.AppendDir( wxS( "pre-layout" ) );
+
+        if( !backupDir.DirExists() )
+        {
+            // Projects adopted before the derived directory became visible keep their backup
+            // in the old hidden location; a revert must still find it.
+            wxFileName legacy = wxFileName::DirName( projectDirectory.GetFullPath() );
+            legacy.AppendDir( wxS( ".kichad" ) );
+            legacy.AppendDir( wxS( "pre-layout" ) );
+
+            if( legacy.DirExists() )
+                backupDir = legacy;
+        }
 
         if( !backupDir.DirExists() )
         {
@@ -1163,7 +1176,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
         // Back up the current KDS, write the reconciled one, and validate by compiling;
         // restore the backup if the compiler rejects the generated statements.
         wxFileName backupDir = wxFileName::DirName( projectDirectory.GetFullPath() );
-        backupDir.AppendDir( wxS( ".kichad" ) );
+        backupDir.AppendDir( wxS( "kichad" ) );
         backupDir.AppendDir( wxS( "pre-layout" ) );
 
         if( !backupDir.DirExists()
@@ -1351,14 +1364,23 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
 
     namespace bp = boost::process;
 
-    wxFileName temporaryRoot = wxFileName::DirName( wxFileName::GetTempDir() );
-    temporaryRoot.AppendDir( wxS( "kichad-layout-" ) + KIID().AsString() );
+    // The router's own output is the only record of why a run failed, so it is kept in the
+    // project where both the agent and the user can read it after the call returns.
+    const wxFileName targetStem( target.kdsName );
+    wxFileName       logDirectory = wxFileName::DirName( projectDirectory.GetFullPath() );
+    logDirectory.AppendDir( wxS( "kichad" ) );
+    logDirectory.AppendDir( wxS( "layout-logs" ) );
 
-    if( !wxFileName::Mkdir( temporaryRoot.GetFullPath(), 0700 ) )
-        return failure( "tool_failed", "could not create a private layout log directory" );
+    if( !logDirectory.DirExists()
+        && !wxFileName::Mkdir( logDirectory.GetFullPath(), 0755, wxPATH_MKDIR_FULL ) )
+    {
+        return failure( "tool_failed", "could not create the layout log directory" );
+    }
 
-    wxFileName stdoutLog( temporaryRoot.GetFullPath(), wxS( "stdout.log" ) );
-    wxFileName stderrLog( temporaryRoot.GetFullPath(), wxS( "stderr.log" ) );
+    wxFileName stdoutLog( logDirectory.GetFullPath(),
+                          targetStem.GetName() + wxS( "-stdout.log" ) );
+    wxFileName stderrLog( logDirectory.GetFullPath(),
+                          targetStem.GetName() + wxS( "-stderr.log" ) );
 
     bool        finished = false;
     int         exitCode = -1;
@@ -1368,17 +1390,26 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
     // External routers take one board per run.  A project holding one design is handed over
     // as-is; with several, the tool receives a staged copy containing only the target board, so
     // the invocation keeps its original argument contract either way.
-    KICHAD::CODEX_TOOLS::PRIVATE_TEMPORARY_DIRECTORY staging;
     wxFileName inputDirectory = projectDirectory;
 
     if( target.multiDesign )
     {
+        // Kept in the project rather than a temporary directory: the exact input a failing
+        // run was given must still be there afterwards, so the same command can be repeated
+        // by hand.
+        inputDirectory = wxFileName::DirName( projectDirectory.GetFullPath() );
+        inputDirectory.AppendDir( wxS( "kichad" ) );
+        inputDirectory.AppendDir( wxS( "layout-input" ) );
+        inputDirectory.AppendDir( targetStem.GetName() );
+
+        if( inputDirectory.DirExists()
+            && !wxFileName::Rmdir( inputDirectory.GetFullPath(), wxPATH_RMDIR_RECURSIVE ) )
+        {
+            return failure( "tool_failed",
+                            "could not clear the previous staged layout input directory" );
+        }
+
         std::string stagingError;
-
-        if( !staging.Create( "kichad-layout-input", stagingError ) )
-            return failure( "tool_failed", stagingError );
-
-        inputDirectory = wxFileName::DirName( wxString::FromUTF8( staging.Path().string() ) );
 
         if( !stageSingleBoardInput( projectDirectory, target, inputDirectory, stagingError ) )
             return failure( "tool_failed", stagingError );
@@ -1390,6 +1421,18 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
                                                  outputDirectory.GetFullPath().ToStdString(),
                                                  std::string( "--layers" ),
                                                  std::to_string( layers ) };
+
+    // Exactly what KiChad runs, quoted so the user can repeat it in a shell.
+    const auto quoted = []( const std::string& aValue )
+    {
+        return aValue.find_first_of( " \t\"\'" ) == std::string::npos
+                       ? aValue
+                       : "'" + aValue + "'";
+    };
+    std::string commandLine = quoted( tool.GetFullPath().ToStdString() );
+
+    for( const std::string& argument : arguments )
+        commandLine += " " + quoted( argument );
 
     try
     {
@@ -1461,10 +1504,20 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
         }
 
         JSON details = { { "exitCode", exitCode },
-                         { "elapsedMs", elapsed.count() } };
+                         { "elapsedMs", elapsed.count() },
+                         { "command", commandLine },
+                         { "inputDirectory", inputDirectory.GetFullPath().ToUTF8().data() },
+                         { "outputDirectory", outputDirectory.GetFullPath().ToUTF8().data() },
+                         { "stdoutLog", stdoutLog.GetFullPath().ToUTF8().data() },
+                         { "stderrLog", stderrLog.GetFullPath().ToUTF8().data() } };
 
+        // A router that fails without writing to stderr still says what it was doing on
+        // stdout; both tails travel with the failure so diagnosis does not need a rerun.
         if( !stderrTail.empty() )
             details["stderrTail"] = stderrTail;
+
+        if( const std::string stdoutTail = readLogTail( stdoutLog ); !stdoutTail.empty() )
+            details["stdoutTail"] = stdoutTail;
 
         return failure( "external_pnr_failed", runError, details );
     }
@@ -1488,7 +1541,11 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
                         ".kicad_pcb board" );
     }
 
-    JSON payload = { { "outputDirectory", outputDirectory.GetFullPath().ToUTF8().data() },
+    JSON payload = { { "inputDirectory", inputDirectory.GetFullPath().ToUTF8().data() },
+                     { "command", commandLine },
+                     { "stdoutLog", stdoutLog.GetFullPath().ToUTF8().data() },
+                     { "stderrLog", stderrLog.GetFullPath().ToUTF8().data() },
+                     { "outputDirectory", outputDirectory.GetFullPath().ToUTF8().data() },
                      { "board", boardFile.ToUTF8().data() },
                      { "exitCode", exitCode },
                      { "elapsedMs", elapsed.count() },

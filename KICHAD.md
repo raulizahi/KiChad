@@ -125,7 +125,7 @@ or compiled defaults.
 The read-only `inspect.render` operation plots current schematic and 2D board views through the
 matching `kicad-cli`, renders a native 3D board view when requested, crops blank plot margins, and
 attaches the resulting PNG directly to the Codex tool response. Preview files live only under the
-project's derived `.kichad/previews/` directory. The `inspect.pdf` operation writes a user-facing
+project's derived `kichad/previews/` directory. The `inspect.pdf` operation writes a user-facing
 schematic or multipage board PDF into the project (`documentation/<stem>.pdf` and
 `documentation/<stem>-board.pdf` by default, or a project-confined `output` path) without the
 fabrication gates; the gated `fabricate` outputs remain the documents of record. The `diagram`
@@ -159,6 +159,12 @@ take one board per run, so a multi-board project is handed a staged copy contain
 board, its KDS, project file, and schematics, with shared libraries carried along.  `path` may be omitted only when the project holds
 exactly one design, so single-board projects and the external tool contract are unchanged.
 
+Every derived artifact a user may want to open lives in the project's visible `kichad/` directory,
+never a hidden dot-directory: `kichad/previews/` for rendered views, `kichad/pre-layout/` for the
+board saved before an adoption, and `kichad/layout-input/<board>/` plus `kichad/layout-logs/` for
+exactly what the external router was given and what it printed.  A pre-layout backup left in the
+old hidden location by an earlier version is still found by `layout.revert`.
+
 The copper layer count the router is given is the one configured in Preferences → PCB Editor →
 External Layout; `layout` takes no per-call layer count, and a KDS stackup that declares a
 different number of copper layers fails the run with `layer_count_mismatch` rather than handing
@@ -183,7 +189,7 @@ schematic-derived ratsnest.  The agent then drives the `layout` dynamic tool:
 - `run` executes the external tool and returns its machine-readable verdict when a
   `*verdict*.json` or `*-result.json` lands beside the output board; gates consume that data,
   not log text.
-- `adopt` backs up the staged board to the project's `.kichad/pre-layout/` directory and copies
+- `adopt` backs up the staged board to the project's `kichad/pre-layout/` directory and copies
   the routed board into the project for review; `revert` restores the backup if the result is
   rejected.
 - `reconcile` back-annotates an accepted routed board into the KDS — outline, placements, and

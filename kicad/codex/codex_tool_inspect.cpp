@@ -336,7 +336,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleInspect(
             return failure( "invalid_arguments", "inspect.view is not supported" );
 
         wxFileName previewDirectory = wxFileName::DirName( root );
-        previewDirectory.AppendDir( wxS( ".kichad" ) );
+        previewDirectory.AppendDir( wxS( "kichad" ) );
         previewDirectory.AppendDir( wxS( "previews" ) );
 
         if( !previewDirectory.DirExists()
@@ -379,7 +379,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleInspect(
         if( previewFile.Read( png.data(), png.size() ) != previewBytes )
             return failure( "preview_failed", "could not read the complete native preview" );
 
-        const std::string previewRelative = ".kichad/previews/"
+        const std::string previewRelative = "kichad/previews/"
                                             + filename.ToStdString();
         payload["view"] = view;
         payload["page"] = page;

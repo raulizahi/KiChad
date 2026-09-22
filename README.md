@@ -88,7 +88,7 @@ project context and bounded, read-only KiCad 10 design inspection without shell 
 `inspect.render` uses the matching native KiCad backend to attach a cropped schematic, production
 PCB (`pcb2d`), assembly/layout PCB (`pcblayout`, including Fab fields and courtyards), or 3D board
 PNG directly to the Codex tool result, so the model can review actual generated documents
-while iterating; these images are derived previews under `.kichad/previews/`, not another design
+while iterating; these images are derived previews under `kichad/previews/`, not another design
 representation. Previews are plotted as SVG and rasterized in-process, so `kicad-cli` is the only
 executable KiChad needs. `inspect.pdf` writes a complete schematic hierarchy or a multipage board
 layer PDF into the project (`documentation/<stem>.pdf` by default) for the user, without the

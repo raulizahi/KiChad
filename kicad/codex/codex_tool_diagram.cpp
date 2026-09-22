@@ -261,7 +261,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDiagram(
         return result;
 
     wxFileName previewDirectory = wxFileName::DirName( root );
-    previewDirectory.AppendDir( wxS( ".kichad" ) );
+    previewDirectory.AppendDir( wxS( "kichad" ) );
     previewDirectory.AppendDir( wxS( "previews" ) );
 
     if( !previewDirectory.DirExists()
@@ -299,7 +299,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDiagram(
     }
 
     payload["previewAttached"] = true;
-    payload["previewPath"] = ".kichad/previews/" + filename.ToStdString();
+    payload["previewPath"] = "kichad/previews/" + filename.ToStdString();
     result = success( payload );
     const std::string encoded = wxBase64Encode( image.data(), image.size() ).ToStdString();
     result["contentItems"].push_back(
