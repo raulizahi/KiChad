@@ -29,6 +29,10 @@ namespace KICHAD
  *
  * This analyzer derives the requirement from the inventoried footprint pad geometry, compares it
  * against the KDS rules when they are declared, and reports the floors a fabricator must meet.
+ * It also recommends a copper layer count from the same geometry: how deep an escape must reach,
+ * whether the board needs reference and power planes, and whether it carries differential pairs.
+ * When external layout is enabled the user's configured count governs and the recommendation is
+ * advice; otherwise it is what the design should declare.
  * It is deterministic, reads no files, and never changes the design.
  */
 class DESIGN_SCRIPT_ESCAPE_ANALYZER
@@ -40,6 +44,10 @@ public:
     {
         /// False when a declared rule set cannot escape a package in the design.
         bool feasible = true;
+        /// Copper layers the design needs, derived from escape depth, planes, and pairs.
+        int  recommendedCopperLayers = 2;
+        /// Why that many: one plain sentence per contributing factor.
+        JSON layerRationale = JSON::array();
         /// One entry per fine-pitch package: geometry and the floors it requires.
         JSON requirements = JSON::array();
         /// Blocking findings, each naming the component and the floors it needs.

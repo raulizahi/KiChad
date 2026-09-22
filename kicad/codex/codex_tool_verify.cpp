@@ -347,6 +347,15 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayoutVerify(
           { { "feasible", escape.feasible },
             { "summary", escape.summary },
             { "requirements", escape.requirements } } },
+        // Layer count: the user's External Layout setting governs when that mode is on,
+        // otherwise the design should declare what KiChad recommends here.
+        { "copperLayers",
+          { { "recommended", escape.recommendedCopperLayers },
+            { "rationale", escape.layerRationale },
+            { "governedBy", ExternalLayoutEnabled() ? "external layout setting" : "this "
+                                                                                  "recommendation" },
+            { "configured", ExternalLayoutEnabled() ? JSON( ExternalLayoutLayers() )
+                                                    : JSON( nullptr ) } } },
         { "ignoredChecksCount", 0 },
         { "ignoredChecks", JSON::array() },
         { "ignoredChecksTruncated", false },

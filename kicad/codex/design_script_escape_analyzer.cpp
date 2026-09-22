@@ -128,6 +128,8 @@ struct ARRAY_GEOMETRY
 {
     bool    isArray = false;
     bool    hasInteriorPads = false;
+    /// Concentric rings of pads, counted from the outside in.
+    size_t  rings = 0;
     int64_t pitch = 0;        ///< smallest centre-to-centre spacing between neighbours
     int64_t padExtent = 0;    ///< largest pad dimension facing that channel
     size_t  columns = 0;
@@ -202,6 +204,7 @@ ARRAY_GEOMETRY arrayGeometry( const std::vector<PAD>& aPads )
 
     geometry.columns = columnSet.size();
     geometry.rows = rowSet.size();
+    geometry.rings = ( std::min( columnSet.size(), rowSet.size() ) + 1 ) / 2;
     geometry.isArray = geometry.padExtent > 0 && geometry.padExtent < geometry.pitch;
     return geometry;
 }
@@ -237,6 +240,59 @@ KICHAD::DESIGN_SCRIPT_ESCAPE_ANALYZER::Analyze( const JSON& aCompilerIr,
             haveRules ? rules.value( "minimumClearanceNm", int64_t( 0 ) ) : 0;
     const int64_t declaredVia =
             rules.is_object() ? rules.value( "minimumViaDiameterNm", int64_t( 0 ) ) : 0;
+
+    // Declared stackup depth, differential pairs (named NAME_P/NAME_N or NAME+/NAME-), and the
+    // deepest array seen, all feed the layer recommendation below.
+    int64_t declaredCopperLayers = 0;
+
+    for( const JSON& statement : aCompilerIr.value( "pcb", JSON::array() ) )
+    {
+        if( statement.is_object() && statement.value( "kind", "" ) == "stackup"
+            && statement.contains( "copperLayers" )
+            && statement["copperLayers"].is_number_integer() )
+        {
+            declaredCopperLayers = statement["copperLayers"].get<int64_t>();
+        }
+    }
+
+    std::set<std::string> netNames;
+
+    if( aCompilerIr["schematic"].contains( "nets" )
+        && aCompilerIr["schematic"]["nets"].is_array() )
+    {
+        for( const JSON& net : aCompilerIr["schematic"]["nets"] )
+        {
+            if( net.is_object() && net.contains( "name" ) && net["name"].is_string() )
+                netNames.insert( net["name"].get<std::string>() );
+        }
+    }
+
+    int differentialPairs = 0;
+
+    for( const std::string& name : netNames )
+    {
+        const auto positive = []( const std::string& aName ) -> std::string
+        {
+            if( aName.size() > 2 && aName.compare( aName.size() - 2, 2, "_P" ) == 0 )
+                return aName.substr( 0, aName.size() - 2 );
+
+            if( aName.size() > 1 && aName.back() == '+' )
+                return aName.substr( 0, aName.size() - 1 );
+
+            return std::string();
+        };
+
+        const std::string base = positive( name );
+
+        if( base.empty() )
+            continue;
+
+        if( netNames.contains( base + "_N" ) || netNames.contains( base + "-" ) )
+            ++differentialPairs;
+    }
+
+    size_t  deepestRings = 0;
+    int64_t deepestPitch = 0;
 
     std::map<std::string, std::vector<std::string>> componentsByFootprint;
 
@@ -386,11 +442,93 @@ KICHAD::DESIGN_SCRIPT_ESCAPE_ANALYZER::Analyze( const JSON& aCompilerIr,
                       { "maximumViaDiameterNm", wholeMicronsDown( pocket ) } } );
         }
 
+        if( geometry.rings > deepestRings )
+        {
+            deepestRings = geometry.rings;
+            deepestPitch = geometry.pitch;
+        }
+
         result.requirements.push_back( std::move( requirement ) );
+    }
+
+    // Copper layers the design needs.
+    //
+    // A grid array escapes its outer two rings on the component layer; every ring deeper than
+    // that needs one more signal layer reached through a dogbone via.  A board carrying such a
+    // package also needs a solid reference plane and, in practice, a power plane, and any
+    // differential pair needs an adjacent reference plane to have a defined impedance.  Layer
+    // counts are even, so the total is rounded up.
+    int signalLayers = 1;
+    int planes = 0;
+
+    if( deepestRings > 2 )
+        signalLayers = static_cast<int>( deepestRings ) - 1;
+
+    if( !result.requirements.empty() )
+    {
+        planes = 2;
+        result.layerRationale.push_back(
+                "a " + std::to_string( deepestPitch / MICRON ) + " um pitch array "
+                + std::to_string( deepestRings ) + " rings deep needs "
+                + std::to_string( signalLayers ) + " signal layer(s) to escape" );
+        result.layerRationale.push_back(
+                "a fine-pitch array needs a solid reference plane and a power plane" );
+    }
+    else if( differentialPairs > 0 )
+    {
+        planes = 1;
+        result.layerRationale.push_back(
+                std::to_string( differentialPairs )
+                + " differential pair(s) need an adjacent reference plane for defined "
+                  "impedance" );
+    }
+    else
+    {
+        result.layerRationale.push_back(
+                "no fine-pitch array and no differential pairs: two layers are enough" );
+    }
+
+    int recommended = signalLayers + planes;
+
+    if( differentialPairs > 0 && recommended < 4 )
+    {
+        recommended = 4;
+        result.layerRationale.push_back(
+                "differential pairs put the floor at four layers" );
+    }
+
+    if( recommended % 2 != 0 )
+    {
+        ++recommended;
+        result.layerRationale.push_back( "rounded up: boards are built in even layer counts" );
+    }
+
+    result.recommendedCopperLayers = std::max( 2, recommended );
+
+    // A declared stackup that is thinner than the design needs is reported, because no router
+    // can make up the difference.
+    if( declaredCopperLayers > 0 && declaredCopperLayers < result.recommendedCopperLayers )
+    {
+        result.issues.push_back(
+                { { "category", "layout" },
+                  { "type", "insufficient_copper_layers" },
+                  { "severity", "warning" },
+                  { "component", "" },
+                  { "description",
+                    "The KDS stackup declares " + std::to_string( declaredCopperLayers )
+                            + " copper layers, but this design needs about "
+                            + std::to_string( result.recommendedCopperLayers )
+                            + ": " + result.layerRationale.front().get<std::string>()
+                            + ". Declare a deeper stackup, or justify the thinner one." },
+                  { "declaredCopperLayers", declaredCopperLayers },
+                  { "recommendedCopperLayers", result.recommendedCopperLayers } } );
     }
 
     result.summary = { { "analyzedPackages", analyzedPackages },
                        { "finePitchPackages", result.requirements.size() },
-                       { "rulesDeclared", haveRules } };
+                       { "rulesDeclared", haveRules },
+                       { "differentialPairs", differentialPairs },
+                       { "declaredCopperLayers", declaredCopperLayers },
+                       { "recommendedCopperLayers", result.recommendedCopperLayers } };
     return result;
 }
