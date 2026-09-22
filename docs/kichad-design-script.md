@@ -2280,6 +2280,17 @@ declared stackup and the same bounded, exact polygon topology contract as copper
 to KiCad's native `ZT_RULE_AREA` with placement-area behavior explicitly disabled; they are not
 copper zones and are never awaited as filled objects.
 
+**Mechanical keepouts.** A keepout that stands for a mechanical part sitting on the board — a lens
+holder base, a bracket foot, a shield frame, a heat-sink skirt — forbids **components**, not
+copper: `(prohibit (copper false) (vias false) (tracks false) (pads true) (footprints true))`.
+Traces may enter, leave and cross under it; parts and their pads may not sit in it. The part the
+mechanism receives (the image sensor inside a lens holder) sits in a `hole` of the keepout, so it
+is not inside it. Only where metal or a fastener actually touches the board (a screw, a stand-off,
+a metal clip) does copper get forbidden, as its own keepout: `(prohibit (copper true) (vias true)
+(tracks true) (pads true) (footprints true))`. A base keepout that also forbids tracks and vias
+walls in every signal of the part in its hole: camera_front's CSI-2 lanes could not leave the
+sensor window (2026-09-22).
+
 ### Board text form
 
 The canonical KDS version 1 board text form is:
