@@ -119,6 +119,13 @@ take one board per run, so a multi-board project is handed a staged copy contain
 board, its KDS, project file, and schematics, with shared libraries carried along.  `path` may be omitted only when the project holds
 exactly one design, so single-board projects and the external tool contract are unchanged.
 
+The copper layer count the router is given is the one configured in Preferences → PCB Editor →
+External Layout; `layout` takes no per-call layer count, and a KDS stackup that declares a
+different number of copper layers fails the run with `layer_count_mismatch` rather than handing
+the router a different board than the one designed.  Pressing **Stop** during a run terminates the
+external router, removes the partial output directory, and frees the native executor, so an
+interrupted turn does not leave later tool calls refused as busy.
+
 `layout.run` refuses to invoke the external tool unless the Preferences checkbox is enabled —
 the configured executable path (or `KICHAD_EXTERNAL_PNR`) alone is not an opt-in, and a
 disabled mode fails the run with `mode_disabled`.  It further refuses until the project's KDS

@@ -66,6 +66,14 @@ Mermaid renderer is involved.  The PDF lands at a project-confined `.pdf` destin
 (`documentation/<name>.pdf` by default) with the Mermaid text saved beside it as `<stem>.mmd`,
 and the response attaches a `pdftoppm` PNG preview when that rasterizer is available so the
 agent can review the drawing it produced.
+Native tool calls run one at a time, and the panel now says which call is still running and for
+how long when it refuses a concurrent one.  Pressing **Stop** requests cancellation through the
+tool registry: a running external place-and-route child is terminated, its partial output
+directory removed, and the call returns `cancelled` with the project untouched, so an interrupted
+turn cannot leave the executor permanently busy.  The router's copper layer count comes from the
+user's External Layout preference; `layout` accepts no per-call override, and a KDS stackup
+declaring a different copper count fails with `layer_count_mismatch`.
+
 External place and route is per board.  A project may hold several designs, one KDS per board
 paired with `<name>.kicad_pcb`; `layout.path` names which one an operation acts on, `run` routes it
 into its own `<sibling>-<stem>` directory, and `adopt`, `revert`, and `reconcile` act on that board

@@ -358,6 +358,24 @@ int CODEX_TOOL_REGISTRY::ExternalLayoutLayers() const
 }
 
 
+void CODEX_TOOL_REGISTRY::RequestCancellation()
+{
+    m_cancelRequested.store( true );
+}
+
+
+void CODEX_TOOL_REGISTRY::ClearCancellation()
+{
+    m_cancelRequested.store( false );
+}
+
+
+bool CODEX_TOOL_REGISTRY::CancellationRequested() const
+{
+    return m_cancelRequested.load();
+}
+
+
 CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::Specs() const
 {
     JSON specs = JSON::array( { KICHAD::CODEX_TOOLS::ProjectSpec(),

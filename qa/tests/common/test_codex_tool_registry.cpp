@@ -1307,6 +1307,49 @@ BOOST_AUTO_TEST_CASE( RoutesOneBoardAtATimeInAMultiBoardProject )
     BOOST_CHECK_NE( ambiguousMessage.find( "camera_front.kicad_kds" ), std::string::npos );
     BOOST_CHECK_NE( ambiguousMessage.find( "design.kicad_kds" ), std::string::npos );
 
+    // The copper layer count is the user's setting; a run may not contradict it, and a KDS
+    // stackup that disagrees is reported instead of handing the router the wrong board.
+    JSON override = registry.Handle( "layout", { { "operation", "run" },
+                                                  { "path", "camera_front.kicad_kds" },
+                                                  { "layers", 4 } } );
+    BOOST_CHECK( !override.at( "success" ).get<bool>() );
+    BOOST_CHECK_NE( envelope( override )["error"]["message"].get<std::string>().find(
+                            "Preferences" ),
+                    std::string::npos );
+
+    registry.SetExternalLayoutLayers( 6 );
+    write( wxS( "stacked.kicad_kds" ),
+           "(kichad_design\n"
+           "  (version 1)\n"
+           "  (project stacked)\n"
+           "  (component R1 (symbol \"Device:R\") (value \"1k\") "
+           "(footprint \"Resistor:R_0603\"))\n"
+           "  (conformance R1 (datasheet \"https://example.com/r1.pdf\") "
+           "(verified_on 2026-08-05) (pins verified) (application verified))\n"
+           "  (board (stackup\n"
+           "    (finish \"ENIG\") (impedance_controlled false)\n"
+           "    (edge_connector none) (edge_plating false)\n"
+           "    (layers\n"
+           "      (copper F.Cu (thickness 35um))\n"
+           "      (dielectric core (thickness 1.53mm) (material \"FR4\")\n"
+           "        (epsilon_r 4.5) (loss_tangent 0.02) (locked false))\n"
+           "      (copper B.Cu (thickness 35um)))))\n)\n" );
+    write( wxS( "stacked.kicad_pcb" ),
+           "(kicad_pcb (version 20260206) (generator \"pcbnew\") (generator_version \"10.0\"))\n" );
+    JSON mismatch = registry.Handle( "layout", { { "operation", "run" },
+                                                  { "path", "stacked.kicad_kds" } } );
+    BOOST_CHECK( !mismatch.at( "success" ).get<bool>() );
+    BOOST_CHECK_EQUAL( envelope( mismatch )["error"]["code"].get<std::string>(),
+                       "layer_count_mismatch" );
+    BOOST_CHECK_EQUAL( envelope( mismatch )["error"]["details"]["kdsCopperLayers"].get<int>(), 2 );
+    BOOST_CHECK_EQUAL( envelope( mismatch )["error"]["details"]["configuredLayers"].get<int>(),
+                       6 );
+    BOOST_REQUIRE( wxRemoveFile( wxFileName( fixture.Root(),
+                                             wxS( "stacked.kicad_kds" ) ).GetFullPath() ) );
+    BOOST_REQUIRE( wxRemoveFile( wxFileName( fixture.Root(),
+                                             wxS( "stacked.kicad_pcb" ) ).GetFullPath() ) );
+    registry.SetExternalLayoutLayers( 2 );
+
     // A named design is accepted, and the external tool is handed a directory holding only
     // that board: external routers take one board per run, and some reject extra flags.
     write( wxS( "shared.kicad_sym" ), "(kicad_symbol_lib)\n" );
@@ -1431,6 +1474,70 @@ BOOST_AUTO_TEST_CASE( RoutesOneBoardAtATimeInAMultiBoardProject )
     BOOST_REQUIRE_MESSAGE( reverted.at( "success" ).get<bool>(), reverted.dump() );
 
     wxFileName::Rmdir( routedDir.GetFullPath(), wxPATH_RMDIR_RECURSIVE );
+    wxUnsetEnv( wxS( "KICHAD_EXTERNAL_PNR" ) );
+}
+
+
+BOOST_AUTO_TEST_CASE( StopsTheExternalRouterWhenTheTurnIsCancelled )
+{
+    // An interrupted turn must stop the router: otherwise the child keeps running, the
+    // single-call executor stays busy, and every later tool request is refused.
+    TOOL_PROJECT_FIXTURE fixture;
+    const std::string kds =
+            "(kichad_design\n"
+            "  (version 1)\n"
+            "  (project cancelled)\n"
+            "  (component R1 (symbol \"Device:R\") (value \"1k\") "
+            "(footprint \"Resistor:R_0603\"))\n"
+            "  (conformance R1 (datasheet \"https://example.com/r1.pdf\") "
+            "(verified_on 2026-08-05) (pins verified) (application verified))\n)\n";
+    {
+        wxFFile file( wxFileName( fixture.Root(), wxS( "design.kicad_kds" ) ).GetFullPath(),
+                      wxS( "wb" ) );
+        BOOST_REQUIRE( file.IsOpened() );
+        BOOST_REQUIRE_EQUAL( file.Write( kds.data(), kds.size() ), kds.size() );
+    }
+
+    // A router that would run far longer than the test: cancellation must end it.
+    wxFileName slowTool( fixture.Root(), wxS( "slow-router.sh" ) );
+    const std::string script = "#!/bin/sh\nsleep 300\n";
+    {
+        wxFFile file( slowTool.GetFullPath(), wxS( "wb" ) );
+        BOOST_REQUIRE( file.IsOpened() );
+        BOOST_REQUIRE_EQUAL( file.Write( script.data(), script.size() ), script.size() );
+    }
+    BOOST_REQUIRE( wxFileName( slowTool ).SetPermissions( wxPOSIX_USER_READ | wxPOSIX_USER_WRITE
+                                                          | wxPOSIX_USER_EXECUTE ) );
+    BOOST_REQUIRE( wxSetEnv( wxS( "KICHAD_EXTERNAL_PNR" ), slowTool.GetFullPath() ) );
+
+    CODEX_TOOL_REGISTRY registry( [&fixture]() { return fixture.Root(); } );
+    registry.SetExternalLayoutEnabled( true );
+    BOOST_CHECK( !registry.CancellationRequested() );
+
+    JSON result;
+    std::thread run( [&]() { result = registry.Handle( "layout", { { "operation", "run" } } ); } );
+    std::this_thread::sleep_for( std::chrono::milliseconds( 400 ) );
+    const auto stopped = std::chrono::steady_clock::now();
+    registry.RequestCancellation();
+    run.join();
+    const auto elapsed = std::chrono::steady_clock::now() - stopped;
+
+    BOOST_CHECK( !result.at( "success" ).get<bool>() );
+    BOOST_CHECK_EQUAL( envelope( result )["error"]["code"].get<std::string>(), "cancelled" );
+    // The router stopped promptly rather than running to its own timeout.
+    BOOST_CHECK_LT( std::chrono::duration_cast<std::chrono::seconds>( elapsed ).count(), 10 );
+
+    // The partial output directory is gone, so a later run is not blocked by leftovers.
+    wxFileName outputDir = wxFileName::DirName( fixture.Root() );
+    const wxString projectName = outputDir.GetDirs().Last();
+    outputDir.RemoveLastDir();
+    outputDir.AppendDir( projectName + wxS( "-routed" ) );
+    BOOST_CHECK( !outputDir.DirExists() );
+
+    // Clearing cancellation lets work proceed again.
+    registry.ClearCancellation();
+    BOOST_CHECK( !registry.CancellationRequested() );
+
     wxUnsetEnv( wxS( "KICHAD_EXTERNAL_PNR" ) );
 }
 
