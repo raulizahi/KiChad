@@ -159,6 +159,15 @@ take one board per run, so a multi-board project is handed a staged copy contain
 board, its KDS, project file, and schematics, with shared libraries carried along.  `path` may be omitted only when the project holds
 exactly one design, so single-board projects and the external tool contract are unchanged.
 
+KiChad estimates the fabrication features a design's packages require before any routing is
+attempted.  From the inventoried footprint pad geometry it derives, for every fine-pitch grid
+array with interior pads, the channel left between adjacent pads, the diagonal pocket between
+four pads, and therefore the track, clearance, and via floors a fabricator must hold.  `verify
+layout` reports these under `fabFeatures` and fails when the declared rules cannot escape a
+package; `layout.run` refuses the handoff for the same reason rather than spending a router run to
+discover it.  A design that has not declared rules yet is told the floors it will need, so
+impossible minimums are never declared in the first place.
+
 Every derived artifact a user may want to open lives in the project's visible `kichad/` directory,
 never a hidden dot-directory: `kichad/previews/` for rendered views, `kichad/pre-layout/` for the
 board saved before an adoption, and `kichad/layout-input/<board>/` plus `kichad/layout-logs/` for

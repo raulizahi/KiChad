@@ -51,6 +51,7 @@ set( KICAD_SRCS
     codex/design_script_compiler.cpp
     codex/design_script_context_builder.cpp
     codex/design_script_electrical_analyzer.cpp
+    codex/design_script_escape_analyzer.cpp
     codex/design_script_electrical_compiler.cpp
     codex/design_script_custom_pad_proto_generator.cpp
     codex/design_script_device_code_compiler.cpp
