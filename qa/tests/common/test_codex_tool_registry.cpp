@@ -1264,6 +1264,127 @@ BOOST_AUTO_TEST_CASE( BlocksExternalPlaceAndRouteWithoutDatasheetConformance )
 }
 
 
+BOOST_AUTO_TEST_CASE( RoutesOneBoardAtATimeInAMultiBoardProject )
+{
+    // A product with two boards keeps one KDS per board; layout acts on the board named by
+    // path and routes each into its own output directory.
+    TOOL_PROJECT_FIXTURE fixture;
+    BOOST_REQUIRE( wxSetEnv( wxS( "KICHAD_EXTERNAL_PNR" ), wxS( "/usr/bin/true" ) ) );
+    const auto write = [&]( const wxString& aName, const std::string& aContents )
+    {
+        wxFFile file( wxFileName( fixture.Root(), aName ).GetFullPath(), wxS( "wb" ) );
+        BOOST_REQUIRE( file.IsOpened() );
+        BOOST_REQUIRE_EQUAL( file.Write( aContents.data(), aContents.size() ), aContents.size() );
+    };
+    const auto kds = [&]( const std::string& aProject )
+    {
+        return "(kichad_design\n"
+               "  (version 1)\n"
+               "  (project " + aProject + ")\n"
+               "  (component R1 (symbol \"Device:R\") (value \"1k\") "
+               "(footprint \"Resistor:R_0603\"))\n"
+               "  (conformance R1 (datasheet \"https://example.com/r1.pdf\") "
+               "(verified_on 2026-08-05) (pins verified) (application verified))\n)\n";
+    };
+
+    write( wxS( "design.kicad_kds" ), kds( "compute" ) );
+    write( wxS( "camera_front.kicad_kds" ), kds( "camera_front" ) );
+    write( wxS( "camera_front.kicad_pcb" ),
+           "(kicad_pcb (version 20260206) (generator \"pcbnew\") (generator_version \"10.0\"))\n" );
+
+    CODEX_TOOL_REGISTRY registry( [&fixture]() { return fixture.Root(); },
+                                  []() { return true; } );
+    registry.SetExternalLayoutEnabled( true );
+
+    // Without a target the tool says so and names both designs instead of refusing blankly.
+    JSON ambiguous = registry.Handle( "layout", { { "operation", "run" } } );
+    BOOST_REQUIRE_MESSAGE( !ambiguous.at( "success" ).get<bool>(), ambiguous.dump() );
+    BOOST_CHECK_EQUAL( envelope( ambiguous )["error"]["code"].get<std::string>(),
+                       "invalid_arguments" );
+    const std::string ambiguousMessage =
+            envelope( ambiguous )["error"]["message"].get<std::string>();
+    BOOST_CHECK_NE( ambiguousMessage.find( "layout.path" ), std::string::npos );
+    BOOST_CHECK_NE( ambiguousMessage.find( "camera_front.kicad_kds" ), std::string::npos );
+    BOOST_CHECK_NE( ambiguousMessage.find( "design.kicad_kds" ), std::string::npos );
+
+    // A named design is accepted and reaches the external tool.
+    JSON named = registry.Handle( "layout", { { "operation", "run" },
+                                               { "path", "camera_front.kicad_kds" } } );
+    BOOST_REQUIRE_MESSAGE( !named.at( "success" ).get<bool>(), named.dump() );
+    BOOST_CHECK_EQUAL( envelope( named )["error"]["code"].get<std::string>(), "invalid_output" );
+
+    // Rejections: a design that is not there, and a path that is not a bare project file.
+    for( const char* bad : { "missing.kicad_kds", "sub/camera_front.kicad_kds",
+                             "camera_front.kicad_pcb" } )
+    {
+        JSON rejected = registry.Handle( "layout", { { "operation", "run" }, { "path", bad } } );
+        BOOST_CHECK( !rejected.at( "success" ).get<bool>() );
+        BOOST_CHECK_EQUAL( envelope( rejected )["error"]["code"].get<std::string>(),
+                           "invalid_arguments" );
+    }
+
+    // A KDS with no board of its own says which board is missing rather than routing another.
+    write( wxS( "sensor.kicad_kds" ), kds( "sensor" ) );
+    JSON unpaired = registry.Handle( "layout", { { "operation", "run" },
+                                                  { "path", "sensor.kicad_kds" } } );
+    BOOST_CHECK( !unpaired.at( "success" ).get<bool>() );
+    BOOST_CHECK_NE( envelope( unpaired )["error"]["message"].get<std::string>().find(
+                            "sensor.kicad_pcb" ),
+                    std::string::npos );
+    BOOST_REQUIRE( wxRemoveFile( wxFileName( fixture.Root(),
+                                             wxS( "sensor.kicad_kds" ) ).GetFullPath() ) );
+
+    // Each board routes into its own output directory, and adopt takes that board back.
+    wxFileName routedDir = wxFileName::DirName( fixture.Root() );
+    const wxString projectName = routedDir.GetDirs().Last();
+    routedDir.RemoveLastDir();
+    routedDir.AppendDir( projectName + wxS( "-routed-camera_front" ) );
+    BOOST_REQUIRE( wxFileName::Mkdir( routedDir.GetFullPath(), 0755, wxPATH_MKDIR_FULL ) );
+    wxFFile routed( wxFileName( routedDir.GetFullPath(),
+                                wxS( "camera_front.kicad_pcb" ) ).GetFullPath(), wxS( "wb" ) );
+    const std::string routedBoard =
+            "(kicad_pcb (version 20260206) (generator \"pcbnew\") (generator_version \"10.0\")"
+            " (segment (start 1 2) (end 3 4) (width 0.25)))\n";
+    BOOST_REQUIRE( routed.IsOpened() );
+    BOOST_REQUIRE_EQUAL( routed.Write( routedBoard.data(), routedBoard.size() ),
+                         routedBoard.size() );
+    routed.Close();
+
+    wxFFile  computeBefore( fixture.Root() + wxS( "/design.kicad_pcb" ), wxS( "rb" ) );
+    wxString computeOriginal;
+    BOOST_REQUIRE( computeBefore.IsOpened() && computeBefore.ReadAll( &computeOriginal ) );
+    computeBefore.Close();
+
+    JSON adopted = registry.Handle( "layout", { { "operation", "adopt" },
+                                                 { "path", "camera_front.kicad_kds" } } );
+    BOOST_REQUIRE_MESSAGE( adopted.at( "success" ).get<bool>(), adopted.dump() );
+    BOOST_CHECK_EQUAL( envelope( adopted )["data"]["adoptedBoard"].get<std::string>(),
+                       "camera_front.kicad_pcb" );
+    BOOST_CHECK( wxFileName::FileExists(
+            fixture.Root() + wxS( "/.kichad/pre-layout/camera_front.kicad_pcb" ) ) );
+
+    // The camera board took the routed copy; the compute board is byte-for-byte untouched.
+    wxFFile  adoptedBoard( fixture.Root() + wxS( "/camera_front.kicad_pcb" ), wxS( "rb" ) );
+    wxString adoptedText;
+    BOOST_REQUIRE( adoptedBoard.IsOpened() && adoptedBoard.ReadAll( &adoptedText ) );
+    BOOST_CHECK_EQUAL( adoptedText.ToStdString(), routedBoard );
+    adoptedBoard.Close();
+
+    wxFFile  computeAfter( fixture.Root() + wxS( "/design.kicad_pcb" ), wxS( "rb" ) );
+    wxString computeText;
+    BOOST_REQUIRE( computeAfter.IsOpened() && computeAfter.ReadAll( &computeText ) );
+    BOOST_CHECK( computeText == computeOriginal );
+    computeAfter.Close();
+
+    JSON reverted = registry.Handle( "layout", { { "operation", "revert" },
+                                                  { "path", "camera_front.kicad_kds" } } );
+    BOOST_REQUIRE_MESSAGE( reverted.at( "success" ).get<bool>(), reverted.dump() );
+
+    wxFileName::Rmdir( routedDir.GetFullPath(), wxPATH_RMDIR_RECURSIVE );
+    wxUnsetEnv( wxS( "KICHAD_EXTERNAL_PNR" ) );
+}
+
+
 BOOST_AUTO_TEST_CASE( DescribesExactPcbProtobufJsonFieldsWithoutAnEditor )
 {
     TOOL_PROJECT_FIXTURE fixture;

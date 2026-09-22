@@ -152,6 +152,12 @@ desired copper layer count.  Settings live in `kicad.json` (`codex.external_layo
 invoked as `<tool> --input-dir <project> --output-dir <sibling> --layers N`; a project directory
 named `Foo-no-layout` outputs to sibling `Foo`, anything else to `Foo-routed`.
 
+A project holding several boards keeps one KDS per board, each paired with its `<name>.kicad_pcb`.
+`layout` acts on the board named by `path`, routing it into its own `<sibling>-<stem>` output
+directory and passing `--board <name>.kicad_pcb` to the external tool; each board gets its own
+`run`, `adopt`, review, and `reconcile` cycle.  `path` may be omitted only when the project holds
+exactly one design, so single-board projects and the external tool contract are unchanged.
+
 `layout.run` refuses to invoke the external tool unless the Preferences checkbox is enabled —
 the configured executable path (or `KICHAD_EXTERNAL_PNR`) alone is not an opt-in, and a
 disabled mode fails the run with `mode_disabled`.  It further refuses until the project's KDS

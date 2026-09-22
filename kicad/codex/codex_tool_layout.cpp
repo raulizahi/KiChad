@@ -478,6 +478,13 @@ nlohmann::json LayoutSpec()
             { { "type", "string" },
               { "enum", nlohmann::json::array(
                                 { "status", "run", "adopt", "revert", "reconcile" } ) } };
+    schema["properties"]["path"] =
+            { { "type", "string" }, { "maxLength", 4096 },
+              { "description",
+                "Project-relative .kicad_kds naming which board to act on, for a project that "
+                "holds several boards (one KDS per board, each paired with <name>.kicad_pcb). "
+                "Route each board with its own run/adopt/reconcile cycle. Optional, and "
+                "defaulted, only when the project holds exactly one design." } };
     schema["properties"]["outputDirName"] =
             { { "type", "string" }, { "maxLength", 255 },
               { "description",
@@ -498,6 +505,9 @@ nlohmann::json LayoutSpec()
              { "name", "layout" },
              { "description",
                "Invoke the user-configured external third-party place-and-route executable. "
+               "A project may hold several boards, one KDS per board paired with its "
+               "<name>.kicad_pcb; name the board to act on with path and give each board its "
+               "own run, adopt, and reconcile cycle, into its own output directory. "
                "It reads the current project directory (expected staged for handoff: outline "
                "sized to hold all components, connectors fixed, all other footprints outside "
                "the outline, no tracks) and writes a fully placed and routed copy of the "
@@ -531,6 +541,109 @@ nlohmann::json LayoutSpec()
 } // namespace KICHAD::CODEX_TOOLS
 
 
+namespace
+{
+
+/** A layout target: one KDS and the board it pairs with, both file names in the project. */
+struct LAYOUT_TARGET
+{
+    wxString kdsName;
+    wxString boardName;
+    bool     multiDesign = false;
+};
+
+
+/**
+ * Resolve which board an operation acts on.
+ *
+ * A product with several boards keeps one KDS per board in the project, each named after its
+ * KDS project so `<name>.kicad_kds` pairs with `<name>.kicad_pcb`.  `path` names that KDS; it
+ * may be omitted only when the project holds exactly one design, which keeps single-board
+ * projects working exactly as before.
+ */
+bool resolveLayoutTarget( const wxFileName& aProjectDirectory, const nlohmann::json& aArguments,
+                          LAYOUT_TARGET& aTarget, std::string& aError )
+{
+    std::vector<wxString> designs;
+    wxDir                 dir( aProjectDirectory.GetFullPath() );
+    wxString              name;
+
+    for( bool more = dir.IsOpened() && dir.GetFirst( &name, wxS( "*.kicad_kds" ), wxDIR_FILES );
+         more; more = dir.GetNext( &name ) )
+    {
+        designs.push_back( name );
+    }
+
+    std::sort( designs.begin(), designs.end() );
+    aTarget.multiDesign = designs.size() > 1;
+
+    if( aArguments.contains( "path" ) )
+    {
+        if( !aArguments.at( "path" ).is_string() )
+        {
+            aError = "layout.path must be a project-relative .kicad_kds file";
+            return false;
+        }
+
+        wxFileName requested( wxString::FromUTF8( aArguments.at( "path" ).get<std::string>() ) );
+
+        if( requested.IsAbsolute() || requested.GetExt() != wxS( "kicad_kds" )
+            || requested.GetFullName() != requested.GetFullPath() )
+        {
+            aError = "layout.path must name a .kicad_kds file in the project directory";
+            return false;
+        }
+
+        if( std::find( designs.begin(), designs.end(), requested.GetFullName() )
+            == designs.end() )
+        {
+            aError = "the active project has no " + requested.GetFullName().ToStdString();
+            return false;
+        }
+
+        aTarget.kdsName = requested.GetFullName();
+    }
+    else if( designs.empty() )
+    {
+        aError = "the project has no .kicad_kds design; the KDS is the authored source of "
+                 "truth required before external place and route";
+        return false;
+    }
+    else if( designs.size() > 1 )
+    {
+        std::string names;
+
+        for( const wxString& design : designs )
+            names += ( names.empty() ? "" : ", " ) + design.ToStdString();
+
+        aError = "the project holds several designs (" + names
+                 + "); name the one to act on with layout.path and route each board with its "
+                   "own run, adopt, and reconcile cycle";
+        return false;
+    }
+    else
+    {
+        aTarget.kdsName = designs.front();
+    }
+
+    wxFileName board( aProjectDirectory.GetFullPath(), aTarget.kdsName );
+    board.SetExt( wxS( "kicad_pcb" ) );
+
+    if( !board.FileExists() )
+    {
+        aError = "no board " + board.GetFullName().ToStdString() + " pairs with "
+                 + aTarget.kdsName.ToStdString()
+                 + "; a KDS and its board share a name, so apply the design first";
+        return false;
+    }
+
+    aTarget.boardName = board.GetFullName();
+    return true;
+}
+
+} // namespace
+
+
 CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArguments,
                                                              const wxString& aProjectPath,
                                                              bool aMutationAvailable ) const
@@ -559,7 +672,24 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
     if( projectDirectory.GetDirCount() < 1 )
         return failure( "project_unavailable", "The project directory has no parent" );
 
+    LAYOUT_TARGET target;
+    std::string   targetError;
+
+    if( operation != "status"
+        && !resolveLayoutTarget( projectDirectory, aArguments, target, targetError ) )
+    {
+        return failure( "invalid_arguments", targetError );
+    }
+
     wxString outputName = defaultOutputDirectoryName( projectDirectory );
+
+    // Several boards in one project need one output directory each, so the routed results do
+    // not collide in the same sibling.
+    if( target.multiDesign )
+    {
+        wxFileName stem( target.kdsName );
+        outputName += wxS( "-" ) + stem.GetName();
+    }
 
     if( aArguments.contains( "outputDirName" ) )
     {
@@ -631,44 +761,17 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
         wxString routedName;
 
         if( !routedDir.IsOpened()
-            || !routedDir.GetFirst( &routedName, wxS( "*.kicad_pcb" ), wxDIR_FILES ) )
+            || !routedDir.GetFirst( &routedName, target.boardName, wxDIR_FILES ) )
         {
             return failure( "invalid_output",
-                            "the layout output directory contains no .kicad_pcb board" );
+                            "the layout output directory contains no "
+                                    + target.boardName.ToStdString() );
         }
 
-        wxString extraRouted;
-
-        if( routedDir.GetNext( &extraRouted ) )
-        {
-            return failure( "invalid_output",
-                            "the layout output directory contains more than one .kicad_pcb; "
-                            "adopt requires exactly one" );
-        }
-
-        // Overwrite the project's own board file, keeping the project's board filename.
-        wxDir projectDir( projectDirectory.GetFullPath() );
-        wxString targetName;
-
-        if( !projectDir.IsOpened()
-            || !projectDir.GetFirst( &targetName, wxS( "*.kicad_pcb" ), wxDIR_FILES ) )
-        {
-            targetName = routedName;
-        }
-        else
-        {
-            wxString extraTarget;
-
-            if( projectDir.GetNext( &extraTarget ) )
-            {
-                return failure( "invalid_arguments",
-                                "the active project contains more than one .kicad_pcb; adopt "
-                                "cannot determine which board to replace" );
-            }
-        }
-
+        // Overwrite that board in the project, keeping its filename.
+        const wxString   targetName = target.boardName;
         const wxFileName source( outputDirectory.GetFullPath(), routedName );
-        const wxFileName target( projectDirectory.GetFullPath(), targetName );
+        const wxFileName destination( projectDirectory.GetFullPath(), targetName );
 
         // Preserve the staged (unrouted) board so layout.revert can restore it if the
         // routed result is rejected.
@@ -685,14 +788,14 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
 
         const wxFileName backup( backupDir.GetFullPath(), targetName );
 
-        if( target.FileExists()
-            && !wxCopyFile( target.GetFullPath(), backup.GetFullPath(), true ) )
+        if( destination.FileExists()
+            && !wxCopyFile( destination.GetFullPath(), backup.GetFullPath(), true ) )
         {
             return failure( "write_failed",
                             "could not back up the staged board before adoption" );
         }
 
-        if( !wxCopyFile( source.GetFullPath(), target.GetFullPath(), true ) )
+        if( !wxCopyFile( source.GetFullPath(), destination.GetFullPath(), true ) )
         {
             return failure( "write_failed",
                             "could not copy the routed board into the active project" );
@@ -729,25 +832,17 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
         wxString savedName;
 
         if( !savedDir.IsOpened()
-            || !savedDir.GetFirst( &savedName, wxS( "*.kicad_pcb" ), wxDIR_FILES ) )
+            || !savedDir.GetFirst( &savedName, target.boardName, wxDIR_FILES ) )
         {
             return failure( "backup_missing",
-                            "the pre-layout backup directory contains no .kicad_pcb board" );
-        }
-
-        wxString extraSaved;
-
-        if( savedDir.GetNext( &extraSaved ) )
-        {
-            return failure( "backup_missing",
-                            "the pre-layout backup directory contains more than one "
-                            ".kicad_pcb; revert requires exactly one" );
+                            "no pre-layout backup of " + target.boardName.ToStdString()
+                                    + " exists; layout.adopt has not been run for that board" );
         }
 
         const wxFileName backup( backupDir.GetFullPath(), savedName );
-        const wxFileName target( projectDirectory.GetFullPath(), savedName );
+        const wxFileName destination( projectDirectory.GetFullPath(), savedName );
 
-        if( !wxCopyFile( backup.GetFullPath(), target.GetFullPath(), true ) )
+        if( !wxCopyFile( backup.GetFullPath(), destination.GetFullPath(), true ) )
         {
             return failure( "write_failed",
                             "could not restore the pre-layout board into the active project" );
@@ -766,33 +861,8 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
                             "routed board into the KDS" );
         }
 
-        const auto singleFile = [&]( const wxString& aPattern, wxString& aName,
-                                     const char* aWhat ) -> JSON
-        {
-            wxDir dir( projectDirectory.GetFullPath() );
-            wxString extra;
-
-            if( !dir.IsOpened() || !dir.GetFirst( &aName, aPattern, wxDIR_FILES ) )
-                return failure( "invalid_arguments",
-                                std::string( "the active project contains no " ) + aWhat );
-
-            if( dir.GetNext( &extra ) )
-                return failure( "invalid_arguments",
-                                std::string( "the active project contains more than one " )
-                                        + aWhat );
-
-            return JSON();
-        };
-
-        wxString boardName, kdsName;
-
-        if( JSON error = singleFile( wxS( "*.kicad_pcb" ), boardName, ".kicad_pcb board" );
-            !error.is_null() )
-            return error;
-
-        if( JSON error = singleFile( wxS( "*.kicad_kds" ), kdsName, ".kicad_kds design" );
-            !error.is_null() )
-            return error;
+        const wxString boardName = target.boardName;
+        const wxString kdsName = target.kdsName;
 
         const auto readAll = [&]( const wxFileName& aPath, std::string& aText ) -> bool
         {
@@ -1055,27 +1125,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
     // every fitted component's datasheet: compile the authored KDS and require a
     // (conformance ...) record per component, exactly as production fabrication does.
     {
-        wxDir kdsDir( projectDirectory.GetFullPath() );
-        wxString kdsFile;
-
-        if( !kdsDir.IsOpened()
-            || !kdsDir.GetFirst( &kdsFile, wxS( "*.kicad_kds" ), wxDIR_FILES ) )
-        {
-            return failure( "missing_source",
-                            "the project has no .kicad_kds design; the KDS is the authored "
-                            "source of truth required before external place and route" );
-        }
-
-        wxString extraKds;
-
-        if( kdsDir.GetNext( &extraKds ) )
-        {
-            return failure( "invalid_source",
-                            "the project contains more than one .kicad_kds; run cannot "
-                            "determine which design to verify" );
-        }
-
-        wxFile kds( wxFileName( projectDirectory.GetFullPath(), kdsFile ).GetFullPath(),
+        wxFile kds( wxFileName( projectDirectory.GetFullPath(), target.kdsName ).GetFullPath(),
                     wxFile::read );
         const wxFileOffset length = kds.IsOpened() ? kds.Length() : -1;
 
@@ -1180,15 +1230,24 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
     std::string runError;
     const auto  started = std::chrono::steady_clock::now();
 
+    std::vector<std::string> arguments = { std::string( "--input-dir" ),
+                                           projectDirectory.GetFullPath().ToStdString(),
+                                           std::string( "--output-dir" ),
+                                           outputDirectory.GetFullPath().ToStdString(),
+                                           std::string( "--layers" ),
+                                           std::to_string( layers ) };
+
+    // A project holding one design keeps the original contract untouched.  With several, the
+    // tool is told which board to route, because the input directory alone no longer says.
+    if( target.multiDesign )
+    {
+        arguments.push_back( "--board" );
+        arguments.push_back( target.boardName.ToStdString() );
+    }
+
     try
     {
-        bp::child process( tool.GetFullPath().ToStdString(),
-                           bp::args( { std::string( "--input-dir" ),
-                                       projectDirectory.GetFullPath().ToStdString(),
-                                       std::string( "--output-dir" ),
-                                       outputDirectory.GetFullPath().ToStdString(),
-                                       std::string( "--layers" ),
-                                       std::to_string( layers ) } ),
+        bp::child process( tool.GetFullPath().ToStdString(), bp::args( arguments ),
                            bp::std_out > stdoutLog.GetFullPath().ToStdString(),
                            bp::std_err > stderrLog.GetFullPath().ToStdString() );
         const auto deadline = started + std::chrono::seconds( timeoutSeconds );
