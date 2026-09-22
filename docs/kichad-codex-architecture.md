@@ -48,7 +48,7 @@ board, symbol, and footprint s-expressions in-process and returns structural sum
 matching expressions.
 It accepts only existing project-relative paths, resolves symlinks before enforcing the project
 root, checks the file extension against the document root, and caps input/output sizes.  Its only
-writes are derived artifacts: `render` previews under `.kichad/previews/`, and `pdf` documents.
+writes are derived artifacts: `render` previews under `kichad/previews/`, and `pdf` documents.
 `inspect.pdf` plots a complete schematic hierarchy (drawing sheet and colours retained, property
 popups excluded) or a multipage board layer set through the sibling `kicad-cli` into a
 project-confined `.pdf` destination, defaulting to `documentation/<stem>.pdf` and
@@ -66,6 +66,13 @@ Mermaid renderer is involved.  The PDF lands at a project-confined `.pdf` destin
 (`documentation/<name>.pdf` by default) with the Mermaid text saved beside it as `<stem>.mmd`,
 and the response attaches a `pdftoppm` PNG preview when that rasterizer is available so the
 agent can review the drawing it produced.
+Derived artifacts are written to the project's visible `kichad/` directory (`previews/`,
+`pre-layout/`, `layout-input/<board>/`, `layout-logs/`) so the user can open them in an ordinary
+file dialog; nothing the user may need to inspect is kept in a hidden dot-directory or a temporary
+directory that disappears when the call returns.  A failed external run returns the exact command
+line, both log paths, and the tails of stdout and stderr, so a router that explains itself on
+stdout is no longer reported as an unexplained timeout.
+
 Native tool calls run one at a time, and the panel now says which call is still running and for
 how long when it refuses a concurrent one.  Pressing **Stop** requests cancellation through the
 tool registry: a running external place-and-route child is terminated, its partial output

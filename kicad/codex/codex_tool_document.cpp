@@ -429,7 +429,8 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDocument(
             wxFileName file( path );
             const std::string relative = relativeTo( file );
 
-            if( relative.rfind( ".kichad/", 0 ) == 0 || relative.rfind( "fabrication/", 0 ) == 0 )
+            if( relative.rfind( "kichad/", 0 ) == 0
+                || relative.rfind( ".kichad/", 0 ) == 0 || relative.rfind( "fabrication/", 0 ) == 0 )
                 continue;
 
             if( seen++ >= MAX_LIST_ENTRIES )
@@ -764,7 +765,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDocument(
         return failure( "invalid_arguments", "document.page must lie within 1-" + std::to_string( pages ) );
 
     wxFileName previewDirectory = wxFileName::DirName( root.GetFullPath() );
-    previewDirectory.AppendDir( wxS( ".kichad" ) );
+    previewDirectory.AppendDir( wxS( "kichad" ) );
     previewDirectory.AppendDir( wxS( "previews" ) );
 
     if( !previewDirectory.DirExists()
@@ -796,7 +797,7 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleDocument(
         return failure( "preview_failed", "could not read the complete page image" );
 
     payload["page"] = page;
-    payload["previewPath"] = ".kichad/previews/" + filename.ToStdString();
+    payload["previewPath"] = "kichad/previews/" + filename.ToStdString();
     payload["previewBytes"] = static_cast<uint64_t>( pngBytes );
     JSON result = success( payload );
     const std::string encoded = wxBase64Encode( image.data(), image.size() ).ToStdString();

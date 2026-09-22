@@ -331,7 +331,7 @@ BOOST_AUTO_TEST_CASE( AttachesNativePreviewImagesToTheModel )
     BOOST_CHECK_EQUAL( data["view"].get<std::string>(), "schematic" );
     BOOST_CHECK_EQUAL( data["previewBytes"].get<int>(), 8 );
     BOOST_CHECK( data["previewPath"].get<std::string>()
-                         .starts_with( ".kichad/previews/" ) );
+                         .starts_with( "kichad/previews/" ) );
     BOOST_CHECK_EQUAL( calls, 1 );
 
     JSON mismatch = registry.Handle(
@@ -570,7 +570,7 @@ BOOST_AUTO_TEST_CASE( RendersBlockDiagramsToProjectPdfNatively )
         BOOST_CHECK( again["contentItems"][1]["imageUrl"].get<std::string>()
                              .starts_with( "data:image/png;base64," ) );
         BOOST_CHECK( wxFileName::FileExists(
-                fixture.Root() + wxS( "/.kichad/previews/diagram-camera-block-diagram.png" ) ) );
+                fixture.Root() + wxS( "/kichad/previews/diagram-camera-block-diagram.png" ) ) );
     }
     else
     {
@@ -1384,6 +1384,21 @@ BOOST_AUTO_TEST_CASE( RoutesOneBoardAtATimeInAMultiBoardProject )
                                                { "path", "camera_front.kicad_kds" } } );
     BOOST_REQUIRE_MESSAGE( named.at( "success" ).get<bool>(), named.dump() );
 
+    // The staged input, the router's logs, and the exact command survive the call, so a
+    // failing run can be inspected and repeated by hand.
+    JSON runData = envelope( named )["data"];
+    const std::string stagedInput = runData["inputDirectory"].get<std::string>();
+    BOOST_CHECK_NE( stagedInput.find( "kichad/layout-input/camera_front" ), std::string::npos );
+    BOOST_CHECK( wxFileName::DirExists( wxString::FromUTF8( stagedInput ) ) );
+    BOOST_CHECK( wxFileName::FileExists( wxString::FromUTF8( stagedInput )
+                                         + wxS( "/camera_front.kicad_pcb" ) ) );
+    BOOST_CHECK( wxFileName::FileExists(
+            wxString::FromUTF8( runData["stdoutLog"].get<std::string>() ) ) );
+    const std::string command = runData["command"].get<std::string>();
+    BOOST_CHECK_NE( command.find( "--input-dir" ), std::string::npos );
+    BOOST_CHECK_NE( command.find( stagedInput ), std::string::npos );
+    BOOST_CHECK_NE( command.find( "--layers" ), std::string::npos );
+
     wxFFile  handedOver( fixture.Root() + wxS( "/handed-over.txt" ), wxS( "rb" ) );
     wxString listing;
     BOOST_REQUIRE( handedOver.IsOpened() && handedOver.ReadAll( &listing ) );
@@ -1454,7 +1469,7 @@ BOOST_AUTO_TEST_CASE( RoutesOneBoardAtATimeInAMultiBoardProject )
     BOOST_CHECK_EQUAL( envelope( adopted )["data"]["adoptedBoard"].get<std::string>(),
                        "camera_front.kicad_pcb" );
     BOOST_CHECK( wxFileName::FileExists(
-            fixture.Root() + wxS( "/.kichad/pre-layout/camera_front.kicad_pcb" ) ) );
+            fixture.Root() + wxS( "/kichad/pre-layout/camera_front.kicad_pcb" ) ) );
 
     // The camera board took the routed copy; the compute board is byte-for-byte untouched.
     wxFFile  adoptedBoard( fixture.Root() + wxS( "/camera_front.kicad_pcb" ), wxS( "rb" ) );
