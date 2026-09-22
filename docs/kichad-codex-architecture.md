@@ -66,6 +66,13 @@ Mermaid renderer is involved.  The PDF lands at a project-confined `.pdf` destin
 (`documentation/<name>.pdf` by default) with the Mermaid text saved beside it as `<stem>.mmd`,
 and the response attaches a `pdftoppm` PNG preview when that rasterizer is available so the
 agent can review the drawing it produced.
+External place and route is per board.  A project may hold several designs, one KDS per board
+paired with `<name>.kicad_pcb`; `layout.path` names which one an operation acts on, `run` routes it
+into its own `<sibling>-<stem>` directory and passes `--board` to the external tool, and `adopt`,
+`revert`, and `reconcile` act on that board alone, each keeping its own pre-layout backup.  A
+single-design project may omit `path` and invokes the external tool with the original argument
+contract.
+
 The sourcing gate requires DigiKey, Mouser, or Newark stock evidence unless the user approves
 another distributor.  That approval is recorded on the component's KDS source as
 `distributor_exception` (the user's own words) and `distributor_exception_approved_on` (the date),
