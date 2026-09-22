@@ -15,6 +15,7 @@
 #include "design_script_compiler.h"
 #include "design_script_electrical_analyzer.h"
 #include "design_script_footprint_library_generator.h"
+#include "design_script_escape_analyzer.h"
 #include "design_script_layout_analyzer.h"
 #include "design_script_physical_synthesizer.h"
 #include "design_script_simulation_runner.h"
@@ -255,11 +256,28 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayoutVerify(
                         "for structured diagnostics" );
     }
 
+    JSON footprintSources;
+
+    {
+        // Footprint geometry decides the fabrication features the packages require, so it is
+        // inventoried whether or not the design asks for physical synthesis.
+        KICHAD::DESIGN_SCRIPT_FOOTPRINT_LIBRARY_GENERATOR::RESULT generated =
+                KICHAD::DESIGN_SCRIPT_FOOTPRINT_LIBRARY_GENERATOR::Generate( compiled.ir );
+
+        if( generated.ok
+            && KICHAD::CODEX_TOOLS::InventoryProjectFootprints( aProjectPath, compiled.ir,
+                                                                 footprintSources, pathError ) )
+        {
+            for( const auto& [id, nativeSource] : generated.sources.items() )
+                footprintSources[id] = nativeSource;
+        }
+    }
+
     if( compiled.ir.contains( "synthesis" ) && compiled.ir["synthesis"].is_object() )
     {
         KICHAD::DESIGN_SCRIPT_FOOTPRINT_LIBRARY_GENERATOR::RESULT generated =
                 KICHAD::DESIGN_SCRIPT_FOOTPRINT_LIBRARY_GENERATOR::Generate( compiled.ir );
-        JSON footprintSources;
+        footprintSources = JSON::object();
 
         if( !generated.ok )
             return failure( "footprint_generation_failed",
@@ -286,6 +304,14 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayoutVerify(
 
     KICHAD::DESIGN_SCRIPT_LAYOUT_ANALYZER::RESULT analyzed =
             KICHAD::DESIGN_SCRIPT_LAYOUT_ANALYZER::Analyze( compiled.ir );
+
+    // Fabrication features the packages demand: a fine-pitch array that cannot be escaped with
+    // the declared rules is a layout failure, found here instead of by a router hours later.
+    const KICHAD::DESIGN_SCRIPT_ESCAPE_ANALYZER::RESULT escape =
+            KICHAD::DESIGN_SCRIPT_ESCAPE_ANALYZER::Analyze( compiled.ir, footprintSources );
+
+    for( const JSON& issue : escape.issues )
+        analyzed.issues.push_back( issue );
     const size_t totalIssues = analyzed.issues.size();
     JSON page = JSON::array();
 
@@ -297,17 +323,30 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayoutVerify(
 
     const size_t returned = page.size();
     const bool hasMore = static_cast<size_t>( offset ) + returned < totalIssues;
+    size_t layoutWarnings = 0;
+
+    for( const JSON& issue : analyzed.issues )
+    {
+        if( issue.value( "severity", "error" ) == "warning" )
+            ++layoutWarnings;
+    }
+
     JSON payload = {
         { "operation", "layout" },
         { "path", relativePath },
         { "sourceSha256", compiled.sourceSha256 },
-        { "clean", analyzed.clean },
+        { "clean", totalIssues == 0 },
         { "waiversPresent", false },
         { "counts",
-          { { "total", totalIssues }, { "errors", totalIssues }, { "warnings", 0 },
+          { { "total", totalIssues }, { "errors", totalIssues - layoutWarnings },
+            { "warnings", layoutWarnings },
             { "exclusions", 0 }, { "other", 0 },
             { "categories", { { "layout", totalIssues } } } } },
         { "layout", std::move( analyzed.summary ) },
+        { "fabFeatures",
+          { { "feasible", escape.feasible },
+            { "summary", escape.summary },
+            { "requirements", escape.requirements } } },
         { "ignoredChecksCount", 0 },
         { "ignoredChecks", JSON::array() },
         { "ignoredChecksTruncated", false },

@@ -62,6 +62,7 @@ set( QA_COMMON_SRCS
     test_three_d_pdf_artifact_validator.cpp
     test_u3d_artifact_validator.cpp
     test_design_script_compiler.cpp
+    test_design_script_escape_analyzer.cpp
     test_design_script_footprint_authoring.cpp
     test_design_script_pcb_planner.cpp
     test_design_script_pcb_reconciler.cpp
@@ -158,6 +159,7 @@ set( QA_COMMON_SRCS
     ${CMAKE_SOURCE_DIR}/kicad/codex/design_script_compiler.cpp
     ${CMAKE_SOURCE_DIR}/kicad/codex/design_script_context_builder.cpp
     ${CMAKE_SOURCE_DIR}/kicad/codex/design_script_electrical_analyzer.cpp
+    ${CMAKE_SOURCE_DIR}/kicad/codex/design_script_escape_analyzer.cpp
     ${CMAKE_SOURCE_DIR}/kicad/codex/design_script_electrical_compiler.cpp
     ${CMAKE_SOURCE_DIR}/kicad/codex/design_script_custom_pad_proto_generator.cpp
     ${CMAKE_SOURCE_DIR}/kicad/codex/design_script_device_code_compiler.cpp

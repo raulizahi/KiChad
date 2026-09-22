@@ -12,6 +12,8 @@
 #include "codex_tool_registry.h"
 #include "codex_tool_internal.h"
 #include "design_script_compiler.h"
+#include "design_script_escape_analyzer.h"
+#include "design_script_footprint_library_generator.h"
 #include "lossless_sexpr_document.h"
 
 #include <chrono>
@@ -1276,6 +1278,48 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
                 && statement["copperLayers"].is_number_integer() )
             {
                 kdsCopperLayers = statement["copperLayers"].get<int64_t>();
+            }
+        }
+
+        // Fabrication features the packages require.  Handing a router a board whose
+        // fine-pitch parts cannot be escaped with the declared rules wastes an entire run and
+        // reports only as a routing failure, so it is refused here with the floors needed.
+        {
+            JSON footprintSources;
+            std::string inventoryError;
+            KICHAD::DESIGN_SCRIPT_FOOTPRINT_LIBRARY_GENERATOR::RESULT generated =
+                    KICHAD::DESIGN_SCRIPT_FOOTPRINT_LIBRARY_GENERATOR::Generate( compiled.ir );
+
+            if( generated.ok
+                && KICHAD::CODEX_TOOLS::InventoryProjectFootprints(
+                        aProjectPath, compiled.ir, footprintSources, inventoryError ) )
+            {
+                for( const auto& [id, nativeSource] : generated.sources.items() )
+                    footprintSources[id] = nativeSource;
+
+                const KICHAD::DESIGN_SCRIPT_ESCAPE_ANALYZER::RESULT escape =
+                        KICHAD::DESIGN_SCRIPT_ESCAPE_ANALYZER::Analyze( compiled.ir,
+                                                                         footprintSources );
+
+                if( !escape.issues.empty() )
+                {
+                    return failure(
+                            escape.feasible ? "fab_features_undeclared" : "escape_infeasible",
+                            escape.feasible
+                                    ? "the design's fine-pitch packages require fabrication "
+                                      "features that the KDS does not declare; declare (rules "
+                                      "...) at or below the reported floors and a (fab ...) "
+                                      "profile that holds them before place and route"
+                                    : "the declared design rules cannot escape the design's "
+                                      "fine-pitch packages, so no router can complete this "
+                                      "board; declare rules at or below the reported floors, "
+                                      "choose a fab that holds them, or change the package",
+                            { { "fabFeatures",
+                                { { "feasible", escape.feasible },
+                                  { "summary", escape.summary },
+                                  { "requirements", escape.requirements } } },
+                              { "issues", escape.issues } } );
+                }
             }
         }
 

@@ -66,6 +66,15 @@ Mermaid renderer is involved.  The PDF lands at a project-confined `.pdf` destin
 (`documentation/<name>.pdf` by default) with the Mermaid text saved beside it as `<stem>.mmd`,
 and the response attaches a `pdftoppm` PNG preview when that rasterizer is available so the
 agent can review the drawing it produced.
+`design_script_escape_analyzer.cpp` estimates required fabrication features deterministically
+from footprint pad geometry: pads are read from the inventoried native footprints, a grid array is
+recognised by its distinct row and column coordinates, and its escape channel (pitch minus pad) and
+diagonal pocket (pitch x sqrt(2) minus pad) give the floors one escape track and a dogbone via
+need.  Declared rules are compared against them, producing `escape_infeasible` or
+`via_does_not_fit_pocket`; with no rules declared it emits `fab_features_required` naming the
+floors.  The layout gate reports the analysis under `fabFeatures`, and `layout.run` refuses a
+handoff that no router could complete.
+
 Derived artifacts are written to the project's visible `kichad/` directory (`previews/`,
 `pre-layout/`, `layout-input/<board>/`, `layout-logs/`) so the user can open them in an ordinary
 file dialog; nothing the user may need to inspect is kept in a hidden dot-directory or a temporary
