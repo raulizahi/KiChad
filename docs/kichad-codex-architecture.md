@@ -68,10 +68,12 @@ and the response attaches a `pdftoppm` PNG preview when that rasterizer is avail
 agent can review the drawing it produced.
 External place and route is per board.  A project may hold several designs, one KDS per board
 paired with `<name>.kicad_pcb`; `layout.path` names which one an operation acts on, `run` routes it
-into its own `<sibling>-<stem>` directory and passes `--board` to the external tool, and `adopt`,
-`revert`, and `reconcile` act on that board alone, each keeping its own pre-layout backup.  A
-single-design project may omit `path` and invokes the external tool with the original argument
-contract.
+into its own `<sibling>-<stem>` directory, and `adopt`, `revert`, and `reconcile` act on that board
+alone, each keeping its own pre-layout backup.  External routers take one board per run and need
+no new flag: a multi-board project is staged into a private directory holding only the target
+board, its KDS, project file, and schematics, with shared libraries copied along, so the
+invocation keeps the original `--input-dir/--output-dir/--layers` contract.  A single-design
+project is handed over directly.
 
 The sourcing gate requires DigiKey, Mouser, or Newark stock evidence unless the user approves
 another distributor.  That approval is recorded on the component's KDS source as

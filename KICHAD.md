@@ -114,8 +114,9 @@ named `Foo-no-layout` outputs to sibling `Foo`, anything else to `Foo-routed`.
 
 A project holding several boards keeps one KDS per board, each paired with its `<name>.kicad_pcb`.
 `layout` acts on the board named by `path`, routing it into its own `<sibling>-<stem>` output
-directory and passing `--board <name>.kicad_pcb` to the external tool; each board gets its own
-`run`, `adopt`, review, and `reconcile` cycle.  `path` may be omitted only when the project holds
+directory; each board gets its own `run`, `adopt`, review, and `reconcile` cycle.  External routers
+take one board per run, so a multi-board project is handed a staged copy containing only that
+board, its KDS, project file, and schematics, with shared libraries carried along.  `path` may be omitted only when the project holds
 exactly one design, so single-board projects and the external tool contract are unchanged.
 
 `layout.run` refuses to invoke the external tool unless the Preferences checkbox is enabled —

@@ -1307,11 +1307,61 @@ BOOST_AUTO_TEST_CASE( RoutesOneBoardAtATimeInAMultiBoardProject )
     BOOST_CHECK_NE( ambiguousMessage.find( "camera_front.kicad_kds" ), std::string::npos );
     BOOST_CHECK_NE( ambiguousMessage.find( "design.kicad_kds" ), std::string::npos );
 
-    // A named design is accepted and reaches the external tool.
+    // A named design is accepted, and the external tool is handed a directory holding only
+    // that board: external routers take one board per run, and some reject extra flags.
+    write( wxS( "shared.kicad_sym" ), "(kicad_symbol_lib)\n" );
+    write( wxS( "camera_front.kicad_pro" ), "{}\n" );
+    write( wxS( "camera_front_sensors.kicad_sch" ), "(kicad_sch)\n" );
+    write( wxS( "design.kicad_pro" ), "{}\n" );
+
+    wxFileName recorder( fixture.Root(), wxS( "record-input.sh" ) );
+    const std::string script =
+            "#!/bin/sh\n"
+            "# Record the input directory's listing, then behave like a tool that routes it.\n"
+            "while [ $# -gt 0 ]; do\n"
+            "  case \"$1\" in\n"
+            "    --input-dir) input=\"$2\"; shift 2 ;;\n"
+            "    --output-dir) output=\"$2\"; shift 2 ;;\n"
+            "    *) shift ;;\n"
+            "  esac\n"
+            "done\n"
+            "ls \"$input\" > \"" + std::string( fixture.Root().ToUTF8() ) + "/handed-over.txt\"\n"
+            "mkdir -p \"$output\"\n"
+            "cp \"$input\"/*.kicad_pcb \"$output\"/\n";
+    {
+        wxFFile file( recorder.GetFullPath(), wxS( "wb" ) );
+        BOOST_REQUIRE( file.IsOpened() );
+        BOOST_REQUIRE_EQUAL( file.Write( script.data(), script.size() ), script.size() );
+    }
+    BOOST_REQUIRE( wxFileName( recorder ).SetPermissions( wxPOSIX_USER_READ | wxPOSIX_USER_WRITE
+                                                          | wxPOSIX_USER_EXECUTE ) );
+    BOOST_REQUIRE( wxSetEnv( wxS( "KICHAD_EXTERNAL_PNR" ), recorder.GetFullPath() ) );
+
     JSON named = registry.Handle( "layout", { { "operation", "run" },
                                                { "path", "camera_front.kicad_kds" } } );
-    BOOST_REQUIRE_MESSAGE( !named.at( "success" ).get<bool>(), named.dump() );
-    BOOST_CHECK_EQUAL( envelope( named )["error"]["code"].get<std::string>(), "invalid_output" );
+    BOOST_REQUIRE_MESSAGE( named.at( "success" ).get<bool>(), named.dump() );
+
+    wxFFile  handedOver( fixture.Root() + wxS( "/handed-over.txt" ), wxS( "rb" ) );
+    wxString listing;
+    BOOST_REQUIRE( handedOver.IsOpened() && handedOver.ReadAll( &listing ) );
+    handedOver.Close();
+    BOOST_CHECK_NE( listing.Find( wxS( "camera_front.kicad_pcb" ) ), wxNOT_FOUND );
+    BOOST_CHECK_NE( listing.Find( wxS( "camera_front.kicad_kds" ) ), wxNOT_FOUND );
+    BOOST_CHECK_NE( listing.Find( wxS( "camera_front_sensors.kicad_sch" ) ), wxNOT_FOUND );
+    BOOST_CHECK_NE( listing.Find( wxS( "shared.kicad_sym" ) ), wxNOT_FOUND );
+    // The other board and its project never reach the router.
+    BOOST_CHECK_EQUAL( listing.Find( wxS( "design.kicad_pcb" ) ), wxNOT_FOUND );
+    BOOST_CHECK_EQUAL( listing.Find( wxS( "design.kicad_kds" ) ), wxNOT_FOUND );
+    BOOST_CHECK_EQUAL( listing.Find( wxS( "design.kicad_pro" ) ), wxNOT_FOUND );
+
+    wxFileName producedDir = wxFileName::DirName( fixture.Root() );
+    const wxString producedProject = producedDir.GetDirs().Last();
+    producedDir.RemoveLastDir();
+    producedDir.AppendDir( producedProject + wxS( "-routed-camera_front" ) );
+    BOOST_CHECK( wxFileName::FileExists( producedDir.GetFullPath()
+                                         + wxS( "camera_front.kicad_pcb" ) ) );
+    wxFileName::Rmdir( producedDir.GetFullPath(), wxPATH_RMDIR_RECURSIVE );
+    BOOST_REQUIRE( wxSetEnv( wxS( "KICHAD_EXTERNAL_PNR" ), wxS( "/usr/bin/true" ) ) );
 
     // Rejections: a design that is not there, and a path that is not a bare project file.
     for( const char* bad : { "missing.kicad_kds", "sub/camera_front.kicad_kds",
