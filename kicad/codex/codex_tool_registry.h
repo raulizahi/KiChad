@@ -12,6 +12,7 @@
 #ifndef KICHAD_CODEX_TOOL_REGISTRY_H
 #define KICHAD_CODEX_TOOL_REGISTRY_H
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <mutex>
@@ -56,7 +57,7 @@ public:
                                 const wxFileName&, const std::string&, std::string& )>;
     // Bump whenever the model-visible tool or capability contract changes so a project cannot
     // resume a persistent thread created with a broader or incompatible surface.
-    static constexpr int SCHEMA_VERSION = 20;
+    static constexpr int SCHEMA_VERSION = 21;
 
     explicit CODEX_TOOL_REGISTRY( std::function<wxString()> aProjectPathProvider,
                                   std::function<bool()> aMutationGuard = {},
@@ -82,6 +83,15 @@ public:
     int ExternalLayoutLayers() const;
     void SetExternalLayoutEnabled( bool aEnabled );
     bool ExternalLayoutEnabled() const;
+
+    /**
+     * Cancellation for long-running native work (external place and route).  A turn the user
+     * interrupts must not leave a child process running with no way to stop it, and must not
+     * leave the single-call executor busy so every later tool request is refused.
+     */
+    void RequestCancellation();
+    void ClearCancellation();
+    bool CancellationRequested() const;
 
     static bool RequiresFinalConfirmation( const std::string& aTool,
                                            const JSON& aArguments );
@@ -139,6 +149,7 @@ private:
     std::function<bool( const wxFileName&, std::string& )> m_footprintLibraryValidator;
     NATIVE_PREVIEW_RUNNER m_nativePreviewRunner;
     NATIVE_PDF_RUNNER     m_nativePdfRunner;
+    mutable std::atomic_bool m_cancelRequested{ false };
 };
 
 #endif // KICHAD_CODEX_TOOL_REGISTRY_H

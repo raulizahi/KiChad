@@ -165,6 +165,8 @@ private:
     wxString                  m_turnSnapshotHash;
     wxString                  m_preferredModel;
     wxString                  m_preferredReasoningEffort;
+    std::string                m_runningToolName;
+    wxDateTime                 m_runningToolStarted;
     std::map<int, std::thread> m_toolWorkers;
     std::map<int, JSON>       m_toolRequestIds;
     std::mutex                m_toolEventMutex;

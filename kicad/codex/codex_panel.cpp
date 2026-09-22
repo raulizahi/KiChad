@@ -1572,9 +1572,21 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
         // partially overlapping project state.
         if( !m_toolWorkers.empty() )
         {
-            m_client.SendError( aMessage["id"], -32001,
-                                "Another native KiChad tool call is still running" );
-            appendActivity( _( "[tool result: executor busy]\n" ) );
+            const long long elapsed =
+                    m_runningToolStarted.IsValid()
+                            ? ( wxDateTime::UNow() - m_runningToolStarted ).GetSeconds().ToLong()
+                            : 0;
+            std::string busy = "A previous KiChad tool call (" + m_runningToolName
+                               + ") is still running";
+
+            if( elapsed > 0 )
+                busy += " after " + std::to_string( elapsed ) + "s";
+
+            busy += "; native calls run one at a time. Wait for it to return, or ask the user "
+                    "to press Stop to cancel it.";
+            m_client.SendError( aMessage["id"], -32001, busy );
+            appendActivity( wxString::Format( _( "[tool result: executor busy — %s]\n" ),
+                                              wxString::FromUTF8( busy ) ) );
             return;
         }
 
@@ -1615,6 +1627,8 @@ void CODEX_PANEL::onAppServerMessage( const JSON& aMessage )
         {
             auto worker = m_toolWorkers.try_emplace( taskId ).first;
             m_toolRequestIds.emplace( taskId, requestId );
+            m_runningToolName = tool;
+            m_runningToolStarted = wxDateTime::UNow();
 
             worker->second = std::thread(
                             [this, taskId, tool = std::move( tool ),
@@ -2033,6 +2047,7 @@ bool CODEX_PANEL::submitUserMessage( const wxString& aMessage )
     }
 
     m_turnSnapshotHash.clear();
+    m_toolRegistry.ClearCancellation();
 
     if( m_snapshotProvider )
     {
@@ -2115,6 +2130,16 @@ void CODEX_PANEL::maybeAutoContinue( const wxString& aAgentText )
 void CODEX_PANEL::onStop( wxCommandEvent& aEvent )
 {
     m_autoContinueRemaining = 0;
+
+    // Long-running native work (external place and route) must stop too, or it keeps the
+    // single-call executor busy and every later tool request is refused for the rest of the
+    // session.
+    m_toolRegistry.RequestCancellation();
+
+    if( !m_toolWorkers.empty() )
+    {
+        appendActivity( _( "[stopping the running KiChad tool call...]\n" ) );
+    }
 
     if( m_threadId.empty() || m_turnId.empty() )
         return;

@@ -496,12 +496,8 @@ nlohmann::json LayoutSpec()
             { { "type", "integer" }, { "minimum", 10 },
               { "maximum", MAX_EXTERNAL_PNR_TIMEOUT_SECONDS },
               { "description", "Maximum run time; defaults to 600." } };
-    schema["properties"]["layers"] =
-            { { "type", "integer" }, { "minimum", 1 }, { "maximum", 64 },
-              { "description",
-                "Copper layer count the external tool may route on. Defaults to the desired "
-                "layer count configured in Preferences > PCB Editor > External Layout; pass "
-                "only when the board stackup genuinely differs from that setting." } };
+    // The copper layer count is the user's setting, not a per-call argument: a run that
+    // silently contradicts it hands the router a different board than the one designed.
 
     return { { "type", "function" },
              { "name", "layout" },
@@ -1227,6 +1223,9 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
     if( !configured )
         return failure( "tool_unconfigured", toolError );
 
+    // Copper layer count declared by the authored stackup, if it declares one.
+    int64_t kdsCopperLayers = 0;
+
     // Place and route must not start until the architecture has been verified against
     // every fitted component's datasheet: compile the authored KDS and require a
     // (conformance ...) record per component, exactly as production fabrication does.
@@ -1255,6 +1254,16 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
                             "the KDS design does not compile; fix it before external "
                             "place and route",
                             { { "diagnostics", compiled.diagnostics } } );
+        }
+
+        for( const JSON& statement : compiled.ir.value( "pcb", JSON::array() ) )
+        {
+            if( statement.is_object() && statement.value( "kind", "" ) == "stackup"
+                && statement.contains( "copperLayers" )
+                && statement["copperLayers"].is_number_integer() )
+            {
+                kdsCopperLayers = statement["copperLayers"].get<int64_t>();
+            }
         }
 
         JSON blockers = JSON::array();
@@ -1289,18 +1298,38 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
         }
     }
 
-    int64_t layers = ExternalLayoutLayers();
+    const int64_t layers = ExternalLayoutLayers();
 
     if( aArguments.contains( "layers" ) )
     {
-        if( !aArguments["layers"].is_number_integer() )
-            return failure( "invalid_arguments", "layout.layers must be an integer" );
-
-        layers = aArguments["layers"].get<int64_t>();
+        return failure( "invalid_arguments",
+                        "layout does not take a layer count: the external router routes on the "
+                        "desired copper layer count configured in Preferences > PCB Editor > "
+                        "External Layout (currently " + std::to_string( layers )
+                                + "). Author the KDS stackup with that many copper layers, or "
+                                  "ask the user to change the preference" );
     }
 
     if( layers < 1 || layers > 64 )
-        return failure( "invalid_arguments", "layout.layers must be between 1 and 64" );
+    {
+        return failure( "invalid_arguments",
+                        "the configured external layout copper layer count must be between 1 "
+                        "and 64" );
+    }
+
+    // A KDS stackup that disagrees with the setting means the router would be handed a
+    // different board than the one designed, which is what silently produced unusable runs.
+    if( kdsCopperLayers > 0 && kdsCopperLayers != layers )
+    {
+        return failure( "layer_count_mismatch",
+                        "the KDS stackup declares " + std::to_string( kdsCopperLayers )
+                                + " copper layers but external layout is configured for "
+                                + std::to_string( layers )
+                                + "; author the stackup with the configured count, or ask the "
+                                  "user to change Preferences > PCB Editor > External Layout",
+                        { { "kdsCopperLayers", kdsCopperLayers },
+                          { "configuredLayers", layers } } );
+    }
 
     int timeoutSeconds = DEFAULT_EXTERNAL_PNR_TIMEOUT_SECONDS;
 
@@ -1370,13 +1399,35 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
         const auto deadline = started + std::chrono::seconds( timeoutSeconds );
         std::error_code processError;
 
+        bool cancelled = false;
+
         while( process.running( processError ) && !processError
                && std::chrono::steady_clock::now() < deadline )
         {
+            if( CancellationRequested() )
+            {
+                cancelled = true;
+                break;
+            }
+
             std::this_thread::sleep_for( std::chrono::milliseconds( 50 ) );
         }
 
-        finished = !process.running( processError ) && !processError;
+        finished = !cancelled && !process.running( processError ) && !processError;
+
+        if( cancelled )
+        {
+            // The user interrupted the turn: stop the router rather than leaving it running
+            // with nothing able to report on it.
+            process.terminate();
+            process.wait();
+            wxFileName::Rmdir( outputDirectory.GetFullPath(), wxPATH_RMDIR_RECURSIVE );
+
+            return failure( "cancelled",
+                            "external place and route was stopped because the turn was "
+                            "interrupted; the partial output directory was removed and the "
+                            "project is unchanged, so run can simply be repeated" );
+        }
 
         if( !finished )
         {
