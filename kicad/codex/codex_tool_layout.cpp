@@ -18,7 +18,9 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -507,7 +509,9 @@ nlohmann::json LayoutSpec()
                "Invoke the user-configured external third-party place-and-route executable. "
                "A project may hold several boards, one KDS per board paired with its "
                "<name>.kicad_pcb; name the board to act on with path and give each board its "
-               "own run, adopt, and reconcile cycle, into its own output directory. "
+               "own run, adopt, and reconcile cycle, into its own output directory. External "
+               "routers take one board per run, so a multi-board project is handed a staged "
+               "copy containing only that board. "
                "It reads the current project directory (expected staged for handoff: outline "
                "sized to hold all components, connectors fixed, all other footprints outside "
                "the outline, no tracks) and writes a fully placed and routed copy of the "
@@ -639,6 +643,108 @@ bool resolveLayoutTarget( const wxFileName& aProjectDirectory, const nlohmann::j
 
     aTarget.boardName = board.GetFullName();
     return true;
+}
+
+/**
+ * Stage a single-board copy of the project for the external tool.
+ *
+ * External routers take one board per run, so a project holding several designs cannot be handed
+ * to them whole and must not be described by an extra flag they may not accept.  This copies the
+ * project into a private directory with only the target board, its KDS, its project file, and its
+ * schematics, leaving shared libraries and other assets in place, so the tool sees an ordinary
+ * single-board project and the invocation keeps its original argument contract.
+ */
+bool stageSingleBoardInput( const wxFileName& aProjectDirectory, const LAYOUT_TARGET& aTarget,
+                            const wxFileName& aStagingDirectory, std::string& aError )
+{
+    const wxFileName targetStem( aTarget.kdsName );
+    const wxString   stem = targetStem.GetName();
+    std::set<wxString> otherStems;
+    wxDir              dir( aProjectDirectory.GetFullPath() );
+    wxString           name;
+
+    for( bool more = dir.IsOpened() && dir.GetFirst( &name, wxS( "*.kicad_kds" ), wxDIR_FILES );
+         more; more = dir.GetNext( &name ) )
+    {
+        const wxFileName design( name );
+
+        if( design.GetName() != stem )
+            otherStems.insert( design.GetName() );
+    }
+
+    // A design's own files are named after it; anything else is shared and travels along.
+    const auto belongsToAnotherDesign = [&]( const wxFileName& aFile )
+    {
+        static const std::set<wxString> perDesign = { wxS( "kicad_kds" ), wxS( "kicad_pcb" ),
+                                                      wxS( "kicad_pro" ), wxS( "kicad_prl" ),
+                                                      wxS( "kicad_sch" ),
+                                                      wxS( "kicad_kds_state" ),
+                                                      wxS( "kicad_kds_journal" ) };
+
+        if( !perDesign.contains( aFile.GetExt() ) )
+            return false;
+
+        for( const wxString& other : otherStems )
+        {
+            if( aFile.GetName() == other || aFile.GetName().StartsWith( other + wxS( "_" ) )
+                || aFile.GetName().StartsWith( other + wxS( "-" ) ) )
+                return true;
+        }
+
+        return false;
+    };
+
+    std::function<bool( const wxFileName&, const wxFileName& )> copyTree =
+            [&]( const wxFileName& aFrom, const wxFileName& aTo )
+    {
+        if( !aTo.DirExists() && !wxFileName::Mkdir( aTo.GetFullPath(), 0755, wxPATH_MKDIR_FULL ) )
+        {
+            aError = "could not create the single-board staging directory";
+            return false;
+        }
+
+        wxDir    source( aFrom.GetFullPath() );
+        wxString entry;
+
+        for( bool more = source.IsOpened()
+                         && source.GetFirst( &entry, wxEmptyString, wxDIR_FILES );
+             more; more = source.GetNext( &entry ) )
+        {
+            const wxFileName file( aFrom.GetFullPath(), entry );
+
+            if( belongsToAnotherDesign( file ) )
+                continue;
+
+            if( !wxCopyFile( file.GetFullPath(),
+                             wxFileName( aTo.GetFullPath(), entry ).GetFullPath(), true ) )
+            {
+                aError = "could not stage " + entry.ToStdString() + " for external layout";
+                return false;
+            }
+        }
+
+        for( bool more = source.IsOpened()
+                         && source.GetFirst( &entry, wxEmptyString, wxDIR_DIRS );
+             more; more = source.GetNext( &entry ) )
+        {
+            // Derived KiChad state is not design input.
+            if( entry == wxS( ".kichad" ) || entry == wxS( ".history" ) || entry == wxS( ".git" ) )
+                continue;
+
+            wxFileName child = wxFileName::DirName( aFrom.GetFullPath() );
+            child.AppendDir( entry );
+            wxFileName destination = wxFileName::DirName( aTo.GetFullPath() );
+            destination.AppendDir( entry );
+
+            if( !copyTree( child, destination ) )
+                return false;
+        }
+
+        return true;
+    };
+
+    return copyTree( wxFileName::DirName( aProjectDirectory.GetFullPath() ),
+                     wxFileName::DirName( aStagingDirectory.GetFullPath() ) );
 }
 
 } // namespace
@@ -1230,20 +1336,31 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
     std::string runError;
     const auto  started = std::chrono::steady_clock::now();
 
-    std::vector<std::string> arguments = { std::string( "--input-dir" ),
-                                           projectDirectory.GetFullPath().ToStdString(),
-                                           std::string( "--output-dir" ),
-                                           outputDirectory.GetFullPath().ToStdString(),
-                                           std::string( "--layers" ),
-                                           std::to_string( layers ) };
+    // External routers take one board per run.  A project holding one design is handed over
+    // as-is; with several, the tool receives a staged copy containing only the target board, so
+    // the invocation keeps its original argument contract either way.
+    KICHAD::CODEX_TOOLS::PRIVATE_TEMPORARY_DIRECTORY staging;
+    wxFileName inputDirectory = projectDirectory;
 
-    // A project holding one design keeps the original contract untouched.  With several, the
-    // tool is told which board to route, because the input directory alone no longer says.
     if( target.multiDesign )
     {
-        arguments.push_back( "--board" );
-        arguments.push_back( target.boardName.ToStdString() );
+        std::string stagingError;
+
+        if( !staging.Create( "kichad-layout-input", stagingError ) )
+            return failure( "tool_failed", stagingError );
+
+        inputDirectory = wxFileName::DirName( wxString::FromUTF8( staging.Path().string() ) );
+
+        if( !stageSingleBoardInput( projectDirectory, target, inputDirectory, stagingError ) )
+            return failure( "tool_failed", stagingError );
     }
+
+    const std::vector<std::string> arguments = { std::string( "--input-dir" ),
+                                                 inputDirectory.GetFullPath().ToStdString(),
+                                                 std::string( "--output-dir" ),
+                                                 outputDirectory.GetFullPath().ToStdString(),
+                                                 std::string( "--layers" ),
+                                                 std::to_string( layers ) };
 
     try
     {
