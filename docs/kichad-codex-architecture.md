@@ -66,6 +66,12 @@ Mermaid renderer is involved.  The PDF lands at a project-confined `.pdf` destin
 (`documentation/<name>.pdf` by default) with the Mermaid text saved beside it as `<stem>.mmd`,
 and the response attaches a `pdftoppm` PNG preview when that rasterizer is available so the
 agent can review the drawing it produced.
+The same analyzer recommends a copper layer count: a grid array escapes its outer two rings on the
+component layer and needs one more signal layer per deeper ring, a fine-pitch board needs reference
+and power planes, differential pairs put the floor at four, and the total is rounded up to an even
+count.  `verify layout` reports it under `copperLayers` together with what governs: the user's
+External Layout setting when that mode is enabled, the recommendation otherwise.
+
 `design_script_escape_analyzer.cpp` estimates required fabrication features deterministically
 from footprint pad geometry: pads are read from the inventoried native footprints, a grid array is
 recognised by its distinct row and column coordinates, and its escape channel (pitch minus pad) and

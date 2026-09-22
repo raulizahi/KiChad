@@ -202,6 +202,57 @@ BOOST_AUTO_TEST_CASE( ReportsRequiredFeaturesBeforeAnyRulesAreDeclared )
 }
 
 
+BOOST_AUTO_TEST_CASE( RecommendsACopperLayerCountFromTheDesign )
+{
+    // The sensor package is 9x7 balls: four rings deep, so escaping it needs three signal
+    // layers, plus a reference plane and a power plane, rounded up to an even count.
+    KICHAD::DESIGN_SCRIPT_COMPILER::RESULT compiled =
+            KICHAD::DESIGN_SCRIPT_COMPILER::Compile( design( rules( "0.127mm", "0.127mm",
+                                                                     "0.5mm" ) ) );
+    BOOST_REQUIRE_MESSAGE( compiled.ok, compiled.diagnostics.dump() );
+
+    DESIGN_SCRIPT_ESCAPE_ANALYZER::RESULT result =
+            DESIGN_SCRIPT_ESCAPE_ANALYZER::Analyze( compiled.ir, sources() );
+    BOOST_CHECK_EQUAL( result.recommendedCopperLayers, 6 );
+    BOOST_REQUIRE_GE( result.layerRationale.size(), 2 );
+    BOOST_CHECK_NE( result.layerRationale[0].get<std::string>().find( "rings deep" ),
+                    std::string::npos );
+    BOOST_CHECK_EQUAL( result.summary["recommendedCopperLayers"].get<int>(), 6 );
+
+    // A board with neither fine-pitch parts nor pairs stays at two layers.
+    nlohmann::json coarse = { { "Pkg:BGA", gridArray( "QFN", 9, 7, 1.27, 0.6 ) },
+                              { "Pkg:R0603", sources()["Pkg:R0603"] } };
+    DESIGN_SCRIPT_ESCAPE_ANALYZER::RESULT plain =
+            DESIGN_SCRIPT_ESCAPE_ANALYZER::Analyze( compiled.ir, coarse );
+    BOOST_CHECK_EQUAL( plain.recommendedCopperLayers, 2 );
+}
+
+
+BOOST_AUTO_TEST_CASE( RecommendsFourLayersForDifferentialPairsAlone )
+{
+    // No fine-pitch array, but a differential pair needs a reference plane.
+    const std::string source =
+            "(kichad_design\n"
+            "  (version 1)\n"
+            "  (project pairs)\n"
+            "  (component U1 (symbol \"Device:R\") (value \"driver\") "
+            "(footprint \"Pkg:R0603\"))\n"
+            "  (component U2 (symbol \"Device:R\") (value \"receiver\") "
+            "(footprint \"Pkg:R0603\"))\n"
+            "  (net LVDS_P (presentation labels) (pin U1 1 \"1\") (pin U2 1 \"1\"))\n"
+            "  (net LVDS_N (presentation labels) (pin U1 1 \"2\") (pin U2 1 \"2\"))\n)\n";
+    KICHAD::DESIGN_SCRIPT_COMPILER::RESULT compiled =
+            KICHAD::DESIGN_SCRIPT_COMPILER::Compile( source );
+    BOOST_REQUIRE_MESSAGE( compiled.ok, compiled.diagnostics.dump() );
+
+    nlohmann::json onlyPassives = { { "Pkg:R0603", sources()["Pkg:R0603"] } };
+    DESIGN_SCRIPT_ESCAPE_ANALYZER::RESULT result =
+            DESIGN_SCRIPT_ESCAPE_ANALYZER::Analyze( compiled.ir, onlyPassives );
+    BOOST_CHECK_EQUAL( result.summary["differentialPairs"].get<int>(), 1 );
+    BOOST_CHECK_EQUAL( result.recommendedCopperLayers, 4 );
+}
+
+
 BOOST_AUTO_TEST_CASE( IgnoresCoarsePackagesAndPerimeterOnlyParts )
 {
     // A 0603 resistor and a perimeter-only quad package set no escape floor.

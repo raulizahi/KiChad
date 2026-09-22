@@ -159,6 +159,12 @@ take one board per run, so a multi-board project is handed a staged copy contain
 board, its KDS, project file, and schematics, with shared libraries carried along.  `path` may be omitted only when the project holds
 exactly one design, so single-board projects and the external tool contract are unchanged.
 
+The copper layer count has one rule: with external layout enabled the user's Preferences → PCB
+Editor → External Layout value governs and the KDS stackup must match it; with external layout
+disabled KiChad recommends a count from the design itself, reported by `verify layout` under
+`copperLayers` with the reasoning (escape depth of the deepest fine-pitch array, reference and
+power planes, differential pairs), and a declared stackup thinner than that is reported.
+
 KiChad estimates the fabrication features a design's packages require before any routing is
 attempted.  From the inventoried footprint pad geometry it derives, for every fine-pitch grid
 array with interior pads, the channel left between adjacent pads, the diagonal pocket between

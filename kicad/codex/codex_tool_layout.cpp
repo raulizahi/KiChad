@@ -1382,8 +1382,9 @@ CODEX_TOOL_REGISTRY::JSON CODEX_TOOL_REGISTRY::handleLayout( const JSON& aArgume
                         "the KDS stackup declares " + std::to_string( kdsCopperLayers )
                                 + " copper layers but external layout is configured for "
                                 + std::to_string( layers )
-                                + "; author the stackup with the configured count, or ask the "
-                                  "user to change Preferences > PCB Editor > External Layout",
+                                + "; with external layout on the configured count governs, so "
+                                  "author the stackup with it, or ask the user to change "
+                                  "Preferences > PCB Editor > External Layout",
                         { { "kdsCopperLayers", kdsCopperLayers },
                           { "configuredLayers", layers } } );
     }
